@@ -24,6 +24,7 @@ import FooterButton from "./FooterButton";
 import TitleDiv from "../../../components/common/TitleDiv";
 import AdditionalChargesTile from "./AdditionalChargesTile";
 import { formatVoucherType } from "../../../../utils/formatVoucherType";
+import AddGodownTile from "./AddGodownTile";
 
 function VoucherInitialPage() {
   const dispatch = useDispatch();
@@ -62,13 +63,6 @@ function VoucherInitialPage() {
     (state) => state.secSelectedOrganization.secSelectedOrg
   );
 
-
-
-
-
-
-
-
   const {
     date,
     party,
@@ -84,6 +78,7 @@ function VoucherInitialPage() {
     vanSaleGodown: vanSaleGodownFromRedux,
     additionalCharges: additionalChargesFromRedux = [],
     convertedFrom = [],
+    stockTransferToGodown,
   } = useSelector((state) => state.commonVoucherSlice);
 
   const getApiEndPoint = () => {
@@ -245,8 +240,17 @@ function VoucherInitialPage() {
 
   // Navigation and form handlers
   const handleAddItem = () => {
-    if (Object.keys(party).length === 0) {
+    if (
+      Object.keys(party).length === 0 &&
+      voucherTypeFromRedux !== "stockTransfer"
+    ) {
       toast.error("Select a party first");
+      return;
+    } else if (
+      voucherTypeFromRedux === "stockTransfer" &&
+      Object.keys(stockTransferToGodown).length === 0
+    ) {
+      toast.error("Select a from godown first");
       return;
     }
     navigate("/sUsers/addItemSales");
@@ -254,8 +258,19 @@ function VoucherInitialPage() {
 
   const submitHandler = async () => {
     // Validation
-    if (Object.keys(party).length === 0) {
+    if (
+      Object.keys(party).length === 0 &&
+      voucherTypeFromRedux !== "stockTransfer"
+    ) {
       toast.error("Add a party first");
+      return;
+    }
+
+    if (
+      voucherTypeFromRedux === "stockTransfer" &&
+      Object.keys(stockTransferToGodown).length === 0
+    ) {
+      toast.error("Select a from godown first");
       return;
     }
 
@@ -287,26 +302,35 @@ function VoucherInitialPage() {
     setSubmitLoading(true);
     const voucherNumberTitle = getVoucherNumberTitle();
 
+    let formData = {};
+
     try {
-      const formData = {
-        selectedDate: new Date(selectedDate).toISOString(),
-        voucherType,
-        [voucherNumberTitle]: voucherNumber,
-        orgId: cmp_id,
-        finalAmount: Number(totalAmount.toFixed(2)),
-        party,
-        items,
-        despatchDetails,
-        priceLevelFromRedux,
-        additionalChargesFromRedux,
-        selectedGodownDetails: vanSaleGodownFromRedux,
-        // batchHeights,
-        // convertedFrom,
-        // paymentSplittingData:
-        //   Object.keys(paymentSplittingReduxData).length !== 0
-        //     ? paymentSplittingReduxData
-        //     : {},
-      };
+      if (voucherTypeFromRedux === "stockTransfer") {
+        formData = {
+          selectedDate: new Date(selectedDate).toISOString(),
+          voucherType,
+          orgId: cmp_id,
+
+          [voucherNumberTitle]: voucherNumber,
+          stockTransferToGodown,
+          items,
+          finalAmount: 0,
+        };
+      } else {
+        formData = {
+          selectedDate: new Date(selectedDate).toISOString(),
+          voucherType,
+          [voucherNumberTitle]: voucherNumber,
+          orgId: cmp_id,
+          finalAmount: Number(totalAmount.toFixed(2)),
+          party,
+          items,
+          despatchDetails,
+          priceLevelFromRedux,
+          additionalChargesFromRedux,
+          selectedGodownDetails: vanSaleGodownFromRedux,
+        };
+      }
 
       const endPoint = getApiEndPoint();
       let params = {};
@@ -366,18 +390,24 @@ function VoucherInitialPage() {
           />
           {/* adding party */}
 
-          <AddPartyTile
-            party={party}
-            dispatch={dispatch}
-            removeParty={removeParty}
-            link="/sUsers/searchPartySales"
-            linkBillTo="/sUsers/billToSales"
-            convertedFrom={convertedFrom}
-          />
+          {voucherTypeFromRedux === "stockTransfer" ? (
+            <AddGodownTile />
+          ) : (
+            <AddPartyTile
+              party={party}
+              dispatch={dispatch}
+              removeParty={removeParty}
+              link="/sUsers/searchPartySales"
+              linkBillTo="/sUsers/billToSales"
+              convertedFrom={convertedFrom}
+            />
+          )}
 
           {/* Despatch details */}
 
-          <DespatchDetails tab={"sales"} />
+          {voucherTypeFromRedux !== "stockTransfer" && (
+            <DespatchDetails tab={"sales"} />
+          )}
 
           {/* adding items */}
 
