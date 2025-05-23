@@ -1481,7 +1481,7 @@ export const addGodowns = async (req, res) => {
 
     // If no default godown exists, check if one is provided in the request
     const hasDefaultGodownInRequest = data.some(
-      (item) => item.defaultGodown === true
+      (item) => item.defaultGodown === "true"
     );
 
     // If no default godown exists in DB and none provided in request, return error
