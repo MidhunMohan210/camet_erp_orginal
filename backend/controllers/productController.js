@@ -266,11 +266,11 @@ export const deleteProduct = async (req, res) => {
 // @desc getting product list
 // route get/api/pUsers/
 
+
 export const getProducts = async (req, res) => {
   // Extract request parameters
   const Secondary_user_id = req.sUserId;
   const cmp_id = req.params.cmp_id;
-  // const taxInclusive = req.query.taxInclusive === "true";
   const vanSaleQuery = req.query.vanSale;
   const isVanSale = vanSaleQuery === "true";
   const excludeGodownId = req.query.excludeGodownId;
@@ -310,24 +310,64 @@ export const getProducts = async (req, res) => {
       ];
     }
 
+    // Helper function to validate and normalize godown IDs
+    const validateAndNormalizeGodowns = (godowns) => {
+      if (!godowns) return [];
+      
+      // Convert to array if it's a string
+      let godownArray;
+      if (typeof godowns === 'string') {
+        // Handle comma-separated string or single string
+        godownArray = godowns.includes(',') ? godowns.split(',') : [godowns];
+      } else if (Array.isArray(godowns)) {
+        godownArray = godowns;
+      } else {
+        return [];
+      }
+      
+      // Filter and validate ObjectIds
+      return godownArray
+        .map(id => typeof id === 'string' ? id.trim() : id) // Trim whitespace
+        .filter(id => {
+          // Check if id is not empty, null, or undefined
+          if (!id || id === "" || id === null || id === undefined) {
+            return false;
+          }
+          
+          // Check if it's a valid ObjectId format
+          return mongoose.Types.ObjectId.isValid(id);
+        });
+    };
+
     // Determine which godowns to select based on configuration
     let selectedGodowns = [];
-    if (isVanSale && configuration?.selectedVanSaleGodowns?.length > 0) {
-      selectedGodowns = configuration.selectedVanSaleGodowns;
-      filter["GodownList.godown"] = { $in: selectedGodowns };
-    } else if (!isVanSale && configuration?.selectedGodowns?.length > 0) {
-      selectedGodowns = configuration.selectedGodowns;
-      filter["GodownList.godown"] = { $in: selectedGodowns };
+    if (isVanSale && configuration?.selectedVanSaleGodowns) {
+      selectedGodowns = validateAndNormalizeGodowns(configuration.selectedVanSaleGodowns);
+      
+      // Only add filter if we have valid ObjectIds
+      if (selectedGodowns.length > 0) {
+        filter["GodownList.godown"] = { $in: selectedGodowns };
+      }
+    } else if (!isVanSale && configuration?.selectedGodowns) {
+      selectedGodowns = validateAndNormalizeGodowns(configuration.selectedGodowns);
+      
+      // Only add filter if we have valid ObjectIds
+      if (selectedGodowns.length > 0) {
+        filter["GodownList.godown"] = { $in: selectedGodowns };
+      }
     }
 
     // If we need to exclude a specific godown
     if (excludeGodownId) {
+      // Validate the excludeGodownId
+      if (!mongoose.Types.ObjectId.isValid(excludeGodownId)) {
+        return res.status(400).json({ 
+          message: "Invalid excludeGodownId format" 
+        });
+      }
+      
       // Only get products with godown functionality enabled
       filter.gdnEnabled = true;
-      
-      // MongoDB query to exclude products where any godown in GodownList matches excludeGodownId
-      // This needs a different approach since the filter above doesn't work with your data structure
-      // We'll filter the results in memory after fetching them
     }
 
     // Count total products matching the filter
@@ -366,9 +406,11 @@ export const getProducts = async (req, res) => {
         }
         
         // Check if any godown matches the excludeGodownId
-        const hasExcludedGodown = product.GodownList.some(godown => 
-          godown._id && godown._id.toString() === excludeGodownId.toString()
-        );
+        const hasExcludedGodown = product.GodownList.some(godownItem => {
+          // Handle both populated and non-populated godown references
+          const godownId = godownItem.godown?._id || godownItem.godown;
+          return godownId && godownId.toString() === excludeGodownId.toString();
+        });
         
         // Keep only products that DON'T have the excluded godown
         return !hasExcludedGodown;
@@ -386,7 +428,6 @@ export const getProducts = async (req, res) => {
 
       if (isSaleOrder) {
         // Add hasGodownOrBatch property is always false in sale order since we are not any details of product in sale order
-
         productObject.hasGodownOrBatch = false;
       } else {
         // Add hasGodownOrBatch property based on batch and godown enabled status
@@ -400,19 +441,25 @@ export const getProducts = async (req, res) => {
 
         if (selectedGodowns.length > 0) {
           filteredGodownList = productObject.GodownList.filter(
-            (godownItem) =>
-              godownItem.godown &&
-              selectedGodowns.some(
-                (id) => id.toString() === godownItem.godown._id.toString()
-              )
+            (godownItem) => {
+              if (!godownItem.godown) return false;
+              
+              const godownId = godownItem.godown._id || godownItem.godown;
+              return selectedGodowns.some(
+                (id) => id.toString() === godownId.toString()
+              );
+            }
           );
         }
 
         if (excludeGodownId) {
           filteredGodownList = filteredGodownList.filter(
-            (godownItem) =>
-              !godownItem.godown ||
-              godownItem.godown._id.toString() !== excludeGodownId.toString()
+            (godownItem) => {
+              if (!godownItem.godown) return true;
+              
+              const godownId = godownItem.godown._id || godownItem.godown;
+              return godownId.toString() !== excludeGodownId.toString();
+            }
           );
         }
 
@@ -456,11 +503,6 @@ export const getProducts = async (req, res) => {
           }
         );
       }
-
-      // Add tax inclusive flag if requested
-      // if (taxInclusive) {
-      //   productObject.isTaxInclusive = true;
-      // }
 
       return productObject;
     });
