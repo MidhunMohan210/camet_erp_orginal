@@ -28,6 +28,10 @@ import SecondaryUser from "../models/secondaryUserModel.js";
 export const transactions = async (req, res) => {
   const userId = req.sUserId;
   const cmp_id = req.params.cmp_id;
+  const searchTerm = req.query.searchTerm;
+
+  console.log("searchTerm", searchTerm)
+  
   const {
     todayOnly,
     startOfDayParam,
@@ -303,21 +307,46 @@ export const transactions = async (req, res) => {
         message: "Invalid voucher type selected or all collections ignored",
       });
     }
-    // Create transaction promises based on selected voucher type
-    const transactionPromises = modelsToQuery.map(
-      ({ model, type, numberField }) =>
-        aggregateTransactions(
-          model,
-          {
-            ...matchCriteria,
-            // ...(userId && !isAdmin ? { Secondary_user_id: userId } : {}),
-          },
-          type,
-          numberField,
-          returnFullDetails,
-        ),
-    );
 
+    const escapeRegex = (value = "") =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // Create transaction promises based on selected voucher type
+    // const transactionPromises = modelsToQuery.map(
+    //   ({ model, type, numberField }) =>
+    //     aggregateTransactions(
+    //       model,
+    //       {
+    //         ...matchCriteria,
+    //         // ...(userId && !isAdmin ? { Secondary_user_id: userId } : {}),
+    //       },
+    //       type,
+    //       numberField,
+    //       returnFullDetails,
+    //     ),
+    // );
+const transactionPromises = modelsToQuery.map(
+  ({ model, type, numberField }) => {
+    const searchFilter = {};
+    if (searchTerm?.trim()) {
+      searchFilter[numberField] = {
+        $regex: escapeRegex(searchTerm.trim()),
+        $options: "i",
+      };
+    }
+
+    return aggregateTransactions(
+      model,
+      {
+        ...matchCriteria,
+        ...searchFilter,
+      },
+      type,
+      numberField,
+      returnFullDetails,
+    );
+  },
+);
     const results = await Promise.all(transactionPromises);
 
     const combined = (

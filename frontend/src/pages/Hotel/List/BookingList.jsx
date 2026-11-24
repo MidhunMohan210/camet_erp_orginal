@@ -47,7 +47,8 @@ import useFetch from "@/customHook/useFetch";
 import PrintModal from "../Components/PrintModal";
 import { calculateDiscountValues } from "../Helper/hotelHelper.js";
 import BookingListEditModal from "./BookingListEditModal";
-
+import { isAdminUser } from "@/utils/permissions";
+const secUserData = JSON.parse(localStorage.getItem("sUserData"));
 
 const normalizeAuditDate = (value) => {
   if (!value || typeof value !== "string") return "";
@@ -61,46 +62,6 @@ const isDateLockedByAudit = (date, lockedThroughDate) => {
   if (!normalizedDate || !normalizedLockedDate) return false;
 
   return normalizedDate <= normalizedLockedDate;
-};
-
-const LIST_DATE_FILTER_STORAGE_PREFIX = "hotelListDateFilter";
-const DATE_FILTER_PATHS = new Set([
-  "/sUsers/bookingList",
-  "/sUsers/checkInList",
-  "/sUsers/checkOutList",
-]);
-
-const getListDateFilterStorageKey = (pathname) => {
-  return `${LIST_DATE_FILTER_STORAGE_PREFIX}:${pathname}`;
-};
-
-const getDefaultListDates = () => {
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(new Date().getDate() - 30);
-
-  return {
-    fromDate: thirtyDaysAgo.toISOString().split("T")[0],
-    toDate: new Date().toISOString().split("T")[0],
-  };
-};
-
-const getStoredListDates = (pathname) => {
-  const defaultDates = getDefaultListDates();
-
-  if (!DATE_FILTER_PATHS.has(pathname)) return defaultDates;
-
-  try {
-    const savedDates = JSON.parse(
-      localStorage.getItem(getListDateFilterStorageKey(pathname)),
-    );
-
-    return {
-      fromDate: savedDates?.fromDate || defaultDates.fromDate,
-      toDate: savedDates?.toDate || defaultDates.toDate,
-    };
-  } catch {
-    return defaultDates;
-  }
 };
 
 function BookingList() {
@@ -179,14 +140,20 @@ function BookingList() {
 
   const [remarks, setRemarks] = useState("");
   const [transactionNumber, setTransactionNumber] = useState("");
-  const initialDateFilter = useMemo(() => {
-    return getStoredListDates(location.pathname);
-  }, [location.pathname]);
-  const [fromDate, setFromDate] = useState(initialDateFilter.fromDate);
   const [restaurantSaleManageMent, setRestaurantSaleManageMent] =
     useState(false);
 
-  const [toDate, setToDate] = useState(initialDateFilter.toDate);
+  const selectedDate = useSelector((state) => state.selectedDate.bookingDate);
+  const today = new Date().toISOString().split("T")[0];
+  const get29DaysAgo = () => {
+    const date = new Date();
+    date.setDate(date.getDate() - 29);
+    return date.toISOString().slice(0, 10);
+  };
+  const [fromDate, setFromDate] = useState(
+    selectedDate?.start || get29DaysAgo(),
+  );
+  const [toDate, setToDate] = useState(selectedDate?.end || today);
   const [nightAuditStatus, setNightAuditStatus] = useState(null);
   const [nightAuditLoading, setNightAuditLoading] = useState(false);
   const [nightAuditActionLoading, setNightAuditActionLoading] = useState(false);
@@ -204,7 +171,7 @@ function BookingList() {
   const [selectedSaleDate, setSelectedSaleDate] = useState(
     new Date().toISOString().split("T")[0],
   );
-
+  const checkoutRequestIdRef = useRef(null);
   console.log(selectedEditBooking?.checkInId?.voucherNumber);
 
   const [
@@ -233,10 +200,13 @@ function BookingList() {
 
   const paymentDetails = useSelector((state) => state.paymentSlice);
 
-  console.log(paymentDetails)
   const { _id: cmp_id, configurations } = useSelector(
     (state) => state.secSelectedOrganization.secSelectedOrg,
   );
+  const permission = useSelector((state) => state.permissionData?.permissions);
+
+  console.log(permission?.editPaymentTypes);
+
   const secondaryUserRole =
     JSON.parse(localStorage.getItem("sUserData"))?.role || "user";
   const isSingleAuditDateSelected = fromDate === toDate;
@@ -245,22 +215,16 @@ function BookingList() {
   const lockedThroughDate = nightAuditStatus?.lockedThroughDate || null;
 
   useEffect(() => {
-    const nextDateFilter = getStoredListDates(location.pathname);
-
-    setFromDate(nextDateFilter.fromDate);
-    setToDate(nextDateFilter.toDate);
-  }, [location.pathname]);
+    if (selectedDate) {
+      setFromDate(selectedDate.start);
+      setToDate(selectedDate.end);
+      fetchBookings(1, searchTerm);
+    }
+  }, [selectedDate]);
 
   const handleDateChange = ({ from, to }) => {
     setFromDate(from);
     setToDate(to);
-
-    if (DATE_FILTER_PATHS.has(location.pathname)) {
-      localStorage.setItem(
-        getListDateFilterStorageKey(location.pathname),
-        JSON.stringify({ fromDate: from, toDate: to }),
-      );
-    }
   };
 
   const [expandedRows, setExpandedRows] = useState({});
@@ -349,7 +313,7 @@ function BookingList() {
 
         const normalizeToDate = (d) => {
           const nd = new Date(d);
-          nd.setHours(0, 0, 0, 0);
+          nd.setUTCHours(0, 0, 0, 0);
           return nd;
         };
         const swapDate = room?.swappingDateFrom
@@ -358,9 +322,51 @@ function BookingList() {
 
         // Old room before swap: from arrival to day BEFORE swap
         if (room?.isSwapped && room?.swappingDateFrom) {
-          const swappingDate = normalizeToDate(room.swappingDateFrom);
-          const arrivalDate = normalizeToDate(checkout?.arrivalDate);
+          let swappingDate = normalizeToDate(room.swappingDateFrom);
+          let arrivalDate = normalizeToDate(checkout?.arrivalDate);
+          const currentSelectedRoomId = String(room?._id || "");
+          const currentRoomId = String(room?.roomId?._id || room?.roomId || "");
 
+          let swappedRoomObject = checkout?.roomSwapHistory.find(
+            (swap) =>
+              swap?.fromSelectedRoomId
+                ? String(swap.fromSelectedRoomId) === currentSelectedRoomId
+                : String(swap?.fromRoomId?._id || swap?.fromRoomId || "") ===
+                  currentRoomId,
+          );
+          console.log(swappedRoomObject);
+          if (swappedRoomObject?.toRoomId) {
+            let swappedRoomData = checkout?.selectedRooms.find(
+              (selectedRoom) =>
+                swappedRoomObject?.toSelectedRoomId
+                  ? String(selectedRoom?._id || "") ===
+                    String(swappedRoomObject.toSelectedRoomId)
+                  : String(
+                      selectedRoom?.roomId?._id || selectedRoom?.roomId || "",
+                    ) ===
+                    String(
+                      swappedRoomObject?.toRoomId?._id ||
+                        swappedRoomObject?.toRoomId ||
+                        "",
+                    ),
+            );
+            let isRoomSwappedData = checkout?.roomSwapHistory.find(
+              (swap) =>
+                swap?.toSelectedRoomId
+                  ? String(swap.toSelectedRoomId) === currentSelectedRoomId
+                  : String(swap?.toRoomId?._id || swap?.toRoomId || "") ===
+                    currentRoomId,
+            );
+
+            if (swappedRoomData?.isSwapped === false && isRoomSwappedData) {
+              arrivalDate = normalizeToDate(swappedRoomData.swappingDateFrom);
+              arrivalDate.setDate(arrivalDate.getDate() - 1);
+            } else {
+              console.log(room);
+              arrivalDate = normalizeToDate(checkout.arrivalDate);
+              swappingDate = normalizeToDate(room.swappingDateFrom);
+            }
+          }
           stayDays = Math.floor(
             (swappingDate - arrivalDate) / (1000 * 60 * 60 * 24),
           );
@@ -403,14 +409,13 @@ function BookingList() {
         const additionalPaxPerDay =
           Number(room?.additionalPaxAmountWithTax || 0) / totalStayDays;
 
-
-          console.log(additionalPaxPerDay)
+        console.log(additionalPaxPerDay);
         const foodPlanPerDay =
           Number(room?.foodPlanAmountWithTax || 0) / totalStayDays;
 
         const additionalPaxAmount = additionalPaxPerDay * stayDays;
         let foodPlanAmount = foodPlanPerDay * stayDays;
-  console.log(additionalPaxAmount)
+        console.log(additionalPaxAmount);
         console.log(baseAmount, additionalPaxPerDay, foodPlanAmount);
 
         taxAmount = configurations[0]?.addRateWithTax?.hotelSale
@@ -420,20 +425,14 @@ function BookingList() {
           ? 0
           : foodPlanAmount;
 
-
-        return (
-          sum + baseAmount + taxAmount  + foodPlanAmount
-        );
+        return sum + baseAmount + taxAmount + foodPlanAmount;
       }, 0);
 
       console.log("checkoutTotal", checkoutTotal);
       return (
         total +
-        (checkoutTotal - advance) +
-        Math.abs(
-          Number(checkout?.otherChargeAmount || 0) -
-            Number(checkout?.discountAmount || 0),
-        )
+        (checkoutTotal - advance + Number(checkout?.otherChargeAmount || 0)) -
+        Number(checkout?.discountAmount || 0)
       );
     }, 0);
   };
@@ -535,7 +534,7 @@ function BookingList() {
       location?.state?.selectedCheckOut &&
       paymentDetails?.printData?.selectedCheckOut?.length > 0
     ) {
-      console.log(paymentDetails?.selectedSaleDate );
+      console.log(paymentDetails?.selectedSaleDate);
       setSelectedSaleDate(paymentDetails?.selectedSaleDate || new Date());
       setSelectedAdditionalCharge(
         paymentDetails?.paymentDetails?.additionalChargeArray[0]?._id,
@@ -994,13 +993,13 @@ function BookingList() {
     setSelectedCustomer(selectcustomer);
   };
   console.log(selectedCheckOut);
-const handleCancelBooking = async (id, voucherNumber) => {
-  const styleId = "cancel-booking-swal-style";
+  const handleCancelBooking = async (id, voucherNumber) => {
+    const styleId = "cancel-booking-swal-style";
 
-  if (!document.getElementById(styleId)) {
-    const style = document.createElement("style");
-    style.id = styleId;
-    style.innerHTML = `
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.innerHTML = `
       .cancel-booking-popup {
         border-radius: 14px !important;
         box-shadow: 0 16px 45px rgba(0, 0, 0, 0.38) !important;
@@ -1128,12 +1127,12 @@ const handleCancelBooking = async (id, voucherNumber) => {
         transform: scale(0.9);
       }
     `;
-    document.head.appendChild(style);
-  }
+      document.head.appendChild(style);
+    }
 
-  const confirmation = await Swal.fire({
-    title: "",
-    html: `
+    const confirmation = await Swal.fire({
+      title: "",
+      html: `
       <div class="cancel-booking-body">
         <h2 class="cancel-booking-title">Are you sure?</h2>
 
@@ -1152,93 +1151,93 @@ const handleCancelBooking = async (id, voucherNumber) => {
         ></textarea>
       </div>
     `,
-    showCancelButton: true,
-    confirmButtonText: "Cancel it!",
-    cancelButtonText: "Go Back",
-    reverseButtons: true,
-    focusConfirm: false,
-    background: "#071633",
-    color: "#ffffff",
-    width: 620,
-    padding: "22px",
-    customClass: {
-      popup: "cancel-booking-popup",
-      htmlContainer: "cancel-booking-html",
-      actions: "cancel-booking-actions",
-      confirmButton: "cancel-booking-confirm",
-      cancelButton: "cancel-booking-cancel",
-      validationMessage: "cancel-booking-validation",
-    },
-    buttonsStyling: false,
-    preConfirm: () => {
-      const reason = document.getElementById("cancelReason")?.value?.trim();
+      showCancelButton: true,
+      confirmButtonText: "Cancel it!",
+      cancelButtonText: "Go Back",
+      reverseButtons: true,
+      focusConfirm: false,
+      background: "#071633",
+      color: "#ffffff",
+      width: 620,
+      padding: "22px",
+      customClass: {
+        popup: "cancel-booking-popup",
+        htmlContainer: "cancel-booking-html",
+        actions: "cancel-booking-actions",
+        confirmButton: "cancel-booking-confirm",
+        cancelButton: "cancel-booking-cancel",
+        validationMessage: "cancel-booking-validation",
+      },
+      buttonsStyling: false,
+      preConfirm: () => {
+        const reason = document.getElementById("cancelReason")?.value?.trim();
 
-      if (!reason) {
-        Swal.showValidationMessage("Cancellation reason is required");
-        return false;
-      }
-
-      return { reason };
-    },
-    didOpen: () => {
-      const textarea = document.getElementById("cancelReason");
-      if (textarea) textarea.focus();
-    },
-  });
-
-  if (confirmation.isConfirmed) {
-    setLoader(true);
-    try {
-      const res = await api.put(
-        `/api/sUsers/cancelBooking/${id}`,
-        {
-          status: "cancelled",
-          cancelReason: confirmation.value.reason,
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-          },
-          withCredentials: true,
+        if (!reason) {
+          Swal.showValidationMessage("Cancellation reason is required");
+          return false;
         }
-      );
 
-      await Swal.fire({
-        title: "Cancelled!",
-        html: `
+        return { reason };
+      },
+      didOpen: () => {
+        const textarea = document.getElementById("cancelReason");
+        if (textarea) textarea.focus();
+      },
+    });
+
+    if (confirmation.isConfirmed) {
+      setLoader(true);
+      try {
+        const res = await api.put(
+          `/api/sUsers/cancelBooking/${id}`,
+          {
+            status: "cancelled",
+            cancelReason: confirmation.value.reason,
+          },
+          {
+            headers: {
+              "Content-Type": "application/json",
+            },
+            withCredentials: true,
+          },
+        );
+
+        await Swal.fire({
+          title: "Cancelled!",
+          html: `
           <div class="cancel-success-body">
             <p class="cancel-success-text">
               ${res.data.message || "Booking has been cancelled successfully."}
             </p>
           </div>
         `,
-        icon: "success",
-        background: "#071633",
-        color: "#ffffff",
-        width: 620,
-        padding: "22px",
-        confirmButtonText: "OK",
-        customClass: {
-          popup: "cancel-booking-popup",
-          title: "cancel-success-title",
-          htmlContainer: "cancel-success-html",
-          icon: "cancel-success-icon",
-          confirmButton: "cancel-booking-confirm",
-        },
-        buttonsStyling: false,
-      });
+          icon: "success",
+          background: "#071633",
+          color: "#ffffff",
+          width: 620,
+          padding: "22px",
+          confirmButtonText: "OK",
+          customClass: {
+            popup: "cancel-booking-popup",
+            title: "cancel-success-title",
+            htmlContainer: "cancel-success-html",
+            icon: "cancel-success-icon",
+            confirmButton: "cancel-booking-confirm",
+          },
+          buttonsStyling: false,
+        });
 
-      fetchBookings(1, searchTerm);
-    } catch (error) {
-      toast.error(
-        error.response?.data?.message || "Failed to cancel booking"
-      );
-      console.log(error);
-    } finally {
-      setLoader(false);
+        fetchBookings(1, searchTerm);
+      } catch (error) {
+        toast.error(
+          error.response?.data?.message || "Failed to cancel booking",
+        );
+        console.log(error);
+      } finally {
+        setLoader(false);
+      }
     }
-  }
-};
+  };
   const handleDelete = async (id) => {
     const confirmation = await Swal.fire({
       title: "Are you sure?",
@@ -1402,6 +1401,45 @@ const handleCancelBooking = async (id, voucherNumber) => {
       } else {
         updatedRows[index][field] = Number(value || 0);
       }
+    } else if (
+      field === "amount" &&
+      updatedRows[index].underCategory === "room"
+    ) {
+      console.log(selectedDataForPayment);
+
+      // Calculate total food amount excluding current row
+      let totalFoodAmount =
+        splitPaymentRows.reduce((sum, item, i) => {
+          if (item?.underCategory === "room" && i !== index) {
+            return sum + Number(item.amount || 0);
+          }
+
+          return sum;
+        }, 0) + Number(value || 0);
+
+      console.log(selectedDataForPayment);
+
+      if (totalFoodAmount > Number(selectedDataForPayment?.total || 0)) {
+        updatedRows[index][field] = 0;
+
+        toast.error(
+          "Room amount tagged is already equal to restaurant subtotal",
+        );
+      } else {
+        updatedRows[index][field] = Number(value || 0);
+      }
+    } else if (field === "underCategory" && value == "room") {
+      console.log(splitPaymentRows);
+      let totalFoodAmount = splitPaymentRows.reduce(
+        (sum, item) =>
+          item?.underCategory == "room" ? sum + item.amount : sum,
+        0,
+      );
+      console.log(totalFoodAmount);
+      updatedRows[index][field] = value;
+      updatedRows[index].amount = Math.abs(
+        selectedDataForPayment?.total - totalFoodAmount,
+      );
     } else {
       updatedRows[index][field] = value;
     }
@@ -1422,12 +1460,14 @@ const handleCancelBooking = async (id, voucherNumber) => {
     }
   };
   const handleSavePayment = async () => {
-    console.log("hddd");
-    console.log(selectedCheckOut);
-    console.log(selectedCheckOut.length);
-    console.log(paymentMode);
+    if (saveLoader) return;
 
     setSaveLoader(true);
+
+    if (!checkoutRequestIdRef.current) {
+      checkoutRequestIdRef.current = crypto.randomUUID();
+    }
+
     let paymentDetails;
 
     if (paymentMode === "split") {
@@ -1715,7 +1755,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
       console.log("Hhhh");
       console.log(additionalChargeDataBasedOnSelection);
 
-      restaurantSideDiscountAdjustmentArray.length > 0 &&
+      restaurantSideDiscountAdjustmentArray?.length > 0 &&
         (paymentDetails.restaurantSideDiscountAdjustmentArray =
           restaurantSideDiscountAdjustmentArray);
 
@@ -1728,6 +1768,8 @@ const handleCancelBooking = async (id, voucherNumber) => {
       dispatch(setOnlineType(selectedOnlinetype));
       dispatch(setRestaurantTag(additionalChargeDataBasedOnSelection));
       setIsPartial(false);
+      setSaveLoader(false);
+      checkoutRequestIdRef.current = null;
       proceedToCheckout(dateandstaysdata, processedCheckoutData);
     } else {
       console.log(restaurantSideDiscountAdjustmentArray);
@@ -1735,7 +1777,8 @@ const handleCancelBooking = async (id, voucherNumber) => {
         const response = await api.post(
           `/api/sUsers/convertCheckOutToSale/${cmp_id}`,
           {
-            selectedSaleDate:selectedSaleDate,
+            checkoutRequestId: checkoutRequestIdRef.current,
+            selectedSaleDate: selectedSaleDate,
             paymentMethod: paymentMethod,
             paymentDetails: paymentDetails,
             selectedCheckOut: selectedCheckOut,
@@ -1783,6 +1826,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
         setShowPaymentModal(false);
         fetchBookings(1, searchTerm);
         setShowPrintConfirmModal(true);
+        checkoutRequestIdRef.current = null;
       }
     }
   };
@@ -1887,12 +1931,73 @@ const handleCancelBooking = async (id, voucherNumber) => {
     console.log("HH");
   };
   console.log(bookings);
-  const proceedToCheckout = (roomAssignments, data) => {
-    console.log(roomAssignments);
-    console.log(data);
+  const getCheckoutRoomSegmentIds = (originalCheckIn, roomAssignments) => {
+    const getId = (value) => String(value?._id || value || "");
+    const selectedRoomIds = new Set();
+    const selectedRooms = originalCheckIn?.selectedRooms || [];
 
-    console.log("hhhhhh");
-    setSaveLoader(true);
+    roomAssignments.forEach((assignment) => {
+      const selectedRoomId = getId(assignment?.roomId);
+      const isSelectedRoomId = selectedRooms.some(
+        (room) => getId(room?._id) === selectedRoomId,
+      );
+
+      if (isSelectedRoomId) {
+        selectedRoomIds.add(selectedRoomId);
+        return;
+      }
+
+      // Older checkout assignments identify rooms only by their master room ID.
+      const roomMasterId = getId(assignment?.selectedRoom || assignment?.roomId);
+      selectedRooms
+        .filter((room) => getId(room?.roomId) === roomMasterId)
+        .forEach((room) => selectedRoomIds.add(getId(room?._id)));
+    });
+
+    // Add every earlier segment required by the selected swap chain.
+    let addedRoom = true;
+    while (addedRoom) {
+      addedRoom = false;
+      (originalCheckIn?.roomSwapHistory || []).forEach((swap) => {
+        const isNewSwap = Boolean(swap?.toSelectedRoomId);
+        const toSelectedRoomId = getId(swap?.toSelectedRoomId);
+        const toRoomId = getId(swap?.toRoomId);
+        const includesDestination = isNewSwap
+          ? selectedRoomIds.has(toSelectedRoomId)
+          : selectedRooms.some(
+              (room) =>
+                selectedRoomIds.has(getId(room?._id)) &&
+                getId(room?.roomId) === toRoomId,
+            );
+
+        if (!includesDestination) return;
+
+        if (swap?.fromSelectedRoomId) {
+          const fromSelectedRoomId = getId(swap.fromSelectedRoomId);
+          if (!selectedRoomIds.has(fromSelectedRoomId)) {
+            selectedRoomIds.add(fromSelectedRoomId);
+            addedRoom = true;
+          }
+          return;
+        }
+
+        // Legacy swap history has no segment IDs, so retain the master-room fallback.
+        selectedRooms
+          .filter((room) => getId(room?.roomId) === getId(swap?.fromRoomId))
+          .forEach((room) => {
+            const fromSelectedRoomId = getId(room?._id);
+            if (!selectedRoomIds.has(fromSelectedRoomId)) {
+              selectedRoomIds.add(fromSelectedRoomId);
+              addedRoom = true;
+            }
+          });
+      });
+    }
+
+    return selectedRoomIds;
+  };
+
+  const proceedToCheckout = (roomAssignments, data) => {
     const hasPrint1 = configurations[0]?.defaultPrint?.print1;
     let checkoutData;
     let checkinids = null;
@@ -1903,8 +2008,13 @@ const handleCancelBooking = async (id, voucherNumber) => {
         return group.checkIns.map((checkIn) => {
           const originalCheckIn = checkIn.originalCheckIn;
           const id = checkIn?.checkInId;
+          const selectedRoomIds = getCheckoutRoomSegmentIds(
+            originalCheckIn,
+            checkIn.rooms,
+          );
+
           const roomsToCheckout = originalCheckIn.selectedRooms.filter((room) =>
-            checkIn.rooms.some((r) => r.roomId === room._id),
+            selectedRoomIds.has(String(room._id)),
           );
           const originalCustomerId = originalCheckIn.customerId?._id;
           const isPartialCheckout =
@@ -1922,7 +2032,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
             originalCheckInId: checkIn.checkInId,
             originalCustomerId: originalCustomerId,
             remainingRooms: originalCheckIn.selectedRooms.filter(
-              (room) => !checkIn.rooms.some((r) => r.roomId === room._id),
+              (room) => !selectedRoomIds.has(String(room._id)),
             ),
           };
         });
@@ -1935,10 +2045,14 @@ const handleCancelBooking = async (id, voucherNumber) => {
         return group.checkIns.map((checkIn) => {
           const originalCheckIn = checkIn.originalCheckIn;
 
-          const roomsToCheckout = originalCheckIn.selectedRooms.filter((room) =>
-            checkIn.rooms.some((r) => r.roomId === room._id),
+          const selectedRoomIds = getCheckoutRoomSegmentIds(
+            originalCheckIn,
+            checkIn.rooms,
           );
 
+          const roomsToCheckout = originalCheckIn.selectedRooms.filter((room) =>
+            selectedRoomIds.has(String(room._id)),
+          );
           const originalCustomerId = originalCheckIn.customerId?._id;
 
           const isPartialCheckout =
@@ -1957,7 +2071,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
             originalCheckInId: checkIn.checkInId,
             originalCustomerId,
             remainingRooms: originalCheckIn.selectedRooms.filter(
-              (room) => !checkIn.rooms.some((r) => r.roomId === room._id),
+              (room) => !selectedRoomIds.has(String(room._id)),
             ),
           };
         });
@@ -2204,9 +2318,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
       <div className="hidden md:flex items-center px-4 py-3 text-xs font-bold text-gray-800 uppercase tracking-wider">
         <div className="w-10 text-center">NO</div>
         <div className="w-28 text-center">
-          {location.pathname == "/sUsers/checkOutList"
-            ? "CHO DATE"
-            : "BK DATE"}
+          {location.pathname == "/sUsers/checkOutList" ? "CHO DATE" : "BK DATE"}
         </div>
         <div className="w-32 text-center">
           {location.pathname === "/sUsers/checkOutList"
@@ -2225,9 +2337,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
         <div className="w-28 text-center">FDP.AMT</div>
         <div className="w-28 text-center">AGENT</div>
 
-        {isCheckoutList && (
-          <div className="w-28 text-center">PAY STATUS</div>
-        )}
+        {isCheckoutList && <div className="w-28 text-center">PAY STATUS</div>}
 
         <div className="w-24 text-center">ADV</div>
         <div className="w-24 text-center">RES.AMT</div>
@@ -2265,12 +2375,28 @@ const handleCancelBooking = async (id, voucherNumber) => {
     // console.log(el.voucherNumber);
 
     const findSwappedRooms = (room) => {
+      const currentSelectedRoomId = String(room?._id || "");
+      const currentRoomId = String(room?.roomId?._id || room?.roomId || "");
       let specifcSwap = el.roomSwapHistory.find(
-        (swap) => swap.fromRoomId === room.roomId,
+        (swap) =>
+          swap?.fromSelectedRoomId
+            ? String(swap.fromSelectedRoomId) === currentSelectedRoomId
+            : String(swap?.fromRoomId?._id || swap?.fromRoomId || "") ===
+              currentRoomId,
       );
       let toRoom =
         specifcSwap &&
-        el.selectedRooms.find((room) => room.roomId === specifcSwap.toRoomId);
+        el.selectedRooms.find((selectedRoom) =>
+          specifcSwap?.toSelectedRoomId
+            ? String(selectedRoom?._id || "") ===
+              String(specifcSwap.toSelectedRoomId)
+            : String(
+                selectedRoom?.roomId?._id || selectedRoom?.roomId || "",
+              ) ===
+              String(
+                specifcSwap?.toRoomId?._id || specifcSwap?.toRoomId || "",
+              ),
+        );
       return toRoom ? toRoom.roomName : "";
     };
     const isCheckOutSelected = (order) => {
@@ -2452,14 +2578,14 @@ const handleCancelBooking = async (id, voucherNumber) => {
                       }}
                     />
                   )}
-                  <MdDelete
+                  {/* <MdDelete
                     title="Delete"
                     onClick={(e) => {
                       e.stopPropagation();
                       handleDelete(el._id);
                     }}
                     className="text-red-500 cursor-pointer hover:text-red-700 text-sm"
-                  />
+                  /> */}
                 </div>
               ) : null}
 
@@ -2526,10 +2652,10 @@ const handleCancelBooking = async (id, voucherNumber) => {
               </button>
             </div>
 
-           <div className="w-28 text-center text-gray-600 text-xs">
-  <div>{formatDate(el?.arrivalDate)}</div>
-  <div>({el.arrivalTime})</div>
-</div>
+            <div className="w-28 text-center text-gray-600 text-xs">
+              <div>{formatDate(el?.arrivalDate)}</div>
+              <div>({el.arrivalTime})</div>
+            </div>
             <div className="w-28 text-center text-gray-600 text-xs">
               ₹{el?.selectedRooms?.[0]?.priceLevelRate || "0.00"}
               {el.selectedRooms.length > 1 && "....."}
@@ -2578,12 +2704,12 @@ const handleCancelBooking = async (id, voucherNumber) => {
 
             <div className="w-28 text-center text-gray-600 text-xs">
               ₹
-              { el?.restaurantSubTotal
-                  ? formatCurrency(el.restaurantSubTotal).replace("₹", "")
-                  : "00.00"}
+              {el?.restaurantSubTotal
+                ? formatCurrency(el.restaurantSubTotal).replace("₹", "")
+                : "00.00"}
             </div>
 
-              <div className="w-28 text-center text-gray-800 font-semibold text-xs">
+            <div className="w-28 text-center text-gray-800 font-semibold text-xs">
               ₹
               {el?.displayTotal > 0
                 ? el?.displayTotal
@@ -2597,12 +2723,14 @@ const handleCancelBooking = async (id, voucherNumber) => {
               {el?.displayTotal > 0
                 ? el?.displayTotal
                 : el?.grandTotal
-                  ? formatCurrency(el.roomTotal + el?.restaurantSubTotal).replace("₹", "")
+                  ? formatCurrency(
+                      el.roomTotal + el?.restaurantSubTotal,
+                    ).replace("₹", "")
                   : "00.00"}
             </div>
 
             {/* 🔹 ACTION BUTTONS */}
-            <div className="w-32 flex items-center justify-center gap-1">
+            <div className="w-32 flex items-center justify-center  gap-1">
               {((location.pathname === "/sUsers/bookingList" &&
                 el?.status != "checkIn") ||
                 (el?.status != "checkOut" &&
@@ -2633,6 +2761,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
                     <Printer size={14} strokeWidth={2.2} />
                   </button>
                   <button
+                    title="Preview Bill"
                     onClick={(e) => {
                       e.stopPropagation();
                       setSelectedCustomer(el.customerId?._id);
@@ -2706,18 +2835,19 @@ const handleCancelBooking = async (id, voucherNumber) => {
                   Print
                 </button>
               )}
-              {location.pathname === "/sUsers/checkOutList" && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setIsEditModalOpen(true);
-                    setSelectedEditBooking(el);
-                  }}
-                  className="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-1 px-3 rounded text-xs transition duration-300"
-                >
-                  Edit
-                </button>
-              )}
+              {location.pathname === "/sUsers/checkOutList" &&
+                (isAdminUser(secUserData) || permission?.editPaymentTypes) && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsEditModalOpen(true);
+                      setSelectedEditBooking(el);
+                    }}
+                    className="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-1 px-3 rounded text-xs transition duration-300"
+                  >
+                    Edit
+                  </button>
+                )}
               {(el?.status != "checkIn" &&
                 location.pathname == "/sUsers/bookingList") ||
               (el?.status != "checkOut" &&
@@ -2757,7 +2887,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
                       />
                     )}
                   </div>
-                  <div className="bg-red-500 hover:bg-red-600 text-white font-semibold py-1 px-1 rounded text-xs transition duration-300">
+                  {/* <div className="bg-red-500 hover:bg-red-600 text-white font-semibold py-1 px-1 rounded text-xs transition duration-300">
                     <MdDelete
                       title="Delete booking details"
                       onClick={(e) => {
@@ -2766,10 +2896,14 @@ const handleCancelBooking = async (id, voucherNumber) => {
                       }}
                       className="text-black-500 cursor-pointer hover:text-black-700 text-sm"
                     />
-                  </div>
+                  </div> */}
                 </div>
               ) : null}
-              {(location.pathname === "/sUsers/bookingList" || location.pathname === "/sUsers/checkInList") &&
+              {((location.pathname === "/sUsers/bookingList" &&
+                (secondaryUserRole === "admin" || permission?.cancelBooking)) ||
+                (location.pathname === "/sUsers/checkInList" &&
+                  (secondaryUserRole === "admin" ||
+                    permission?.cancelChecking))) &&
                 el?.status !== "cancelled" && (
                   <button
                     onClick={(e) => {
@@ -3094,88 +3228,28 @@ const handleCancelBooking = async (id, voucherNumber) => {
                         Reopen Audit
                       </button>
                     )}
-
-                  <button
-                    type="button"
-                    onClick={handleCompleteNightAudit}
-                    disabled={
-                      !isSingleAuditDateSelected ||
-                      isNightAuditLocked ||
-                      nightAuditLoading ||
-                      nightAuditActionLoading
-                    }
-                    className="rounded-md bg-[#0f766e] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#115e59] disabled:cursor-not-allowed disabled:bg-slate-300"
-                  >
-                    {nightAuditActionLoading ? "Processing..." : "Night Audit"}
-                  </button>
+                  {(permission?.nightAudit ||
+                    secondaryUserRole === "admin") && (
+                    <button
+                      type="button"
+                      onClick={handleCompleteNightAudit}
+                      disabled={
+                        !isSingleAuditDateSelected ||
+                        isNightAuditLocked ||
+                        nightAuditLoading ||
+                        nightAuditActionLoading
+                      }
+                      className="rounded-md mr-2 bg-[#0f766e] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#115e59] disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >
+                      {nightAuditActionLoading
+                        ? "Processing..."
+                        : "Night Audit"}
+                    </button>
+                  )}
                 </div>
               )
             }
           />
-
-          {/* {location.pathname === "/sUsers/checkInList" && (
-            <div className="bg-white border-b border-slate-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-col gap-1">
-                <span className="text-sm font-semibold text-slate-800">
-                  Night Audit
-                </span>
-                {!isSingleAuditDateSelected ? (
-                  <span className="text-xs text-amber-700">
-                    Select the same From and To date to audit one exact check-in date.
-                  </span>
-                ) : nightAuditLoading ? (
-                  <span className="text-xs text-slate-500">
-                    Checking audit status for {selectedAuditDate}...
-                  </span>
-                ) : isNightAuditLocked ? (
-                  <span className="text-xs text-emerald-700">
-                    Check-ins up to {lockedThroughDate} are night audited. Edit is locked through that date.
-                  </span>
-                ) : nightAuditStatus?.status === "reopened" ? (
-                  <span className="text-xs text-blue-700">
-                    {selectedAuditDate} was reopened. Editing is enabled again.
-                  </span>
-                ) : (
-                  <span className="text-xs text-slate-500">
-                    No completed night audit for {selectedAuditDate}.
-                  </span>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                {isNightAuditLocked && (
-                  <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
-                    Locked Through {lockedThroughDate}
-                  </span>
-                )}
-
-                {secondaryUserRole === "admin" && nightAuditStatus?.status === "completed" && (
-                  <button
-                    type="button"
-                    onClick={handleReopenNightAudit}
-                    disabled={nightAuditActionLoading || nightAuditLoading}
-                    className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    Reopen Audit
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={handleCompleteNightAudit}
-                  disabled={
-                    !isSingleAuditDateSelected ||
-                    isNightAuditLocked ||
-                    nightAuditLoading ||
-                    nightAuditActionLoading
-                  }
-                  className="rounded-md bg-[#0f766e] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[#115e59] disabled:cursor-not-allowed disabled:bg-slate-300"
-                >
-                  {nightAuditActionLoading ? "Processing..." : "Night Audit"}
-                </button>
-              </div>
-            </div>
-          )} */}
         </div>
 
         {!loader && !isLoading && bookings?.length === 0 && (
@@ -3307,6 +3381,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
                   />
                   <button
                     onClick={() => {
+                      if (saveLoader) return;
                       setShowPaymentModal(false);
                       setPaymentMode("single");
                       setCashAmount(0);
@@ -3325,6 +3400,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
                       ]);
                       window.location.reload();
                     }}
+                    disabled={saveLoader}
                     className="w-7 h-7 rounded-lg border border-gray-200 dark:border-neutral-700 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-50 dark:hover:bg-neutral-800 transition-colors"
                   >
                     <X className="w-3.5 h-3.5" />
@@ -3720,8 +3796,8 @@ const handleCancelBooking = async (id, voucherNumber) => {
                                     </span>
                                     {(selectedDataForPayment?.restaurantSubTotal >
                                     0
-                                      ? ["food", "room", "laundry"]
-                                      : ["room", "laundry"]
+                                      ? ["food", "room"]
+                                      : ["room"]
                                     ).map((category) => (
                                       <button
                                         key={category}
@@ -3750,7 +3826,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
                                       >
                                         {category === "food" && "🍽 "}
                                         {category === "room" && "🛏 "}
-                                        {category === "laundry" && "👕 "}
+                                        {/* {category === "laundry" && "👕 "} */}
                                         {category.charAt(0).toUpperCase() +
                                           category.slice(1)}
                                       </button>
@@ -4445,9 +4521,8 @@ const handleCancelBooking = async (id, voucherNumber) => {
                   </div>
 
                   <button
-                    onClick={() => {
-                      handleSavePayment();
-                    }}
+                    onClick={handleSavePayment}
+                    disabled={saveLoader}
                     className={`mt-3 w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-[13px] font-semibold transition-all ${
                       saveLoader
                         ? "bg-gray-100 dark:bg-neutral-700 text-gray-400 cursor-not-allowed"
@@ -4509,6 +4584,7 @@ const handleCancelBooking = async (id, voucherNumber) => {
             selectedCheckIns={selectedCheckOut}
             onClose={setShowRestaurantBillTransfer}
             cmp_id={cmp_id}
+            sendToParent={fetchBookings}
           />
         )}
         {restaurantSaleManageMent && (

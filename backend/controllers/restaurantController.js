@@ -21,6 +21,7 @@ import { FoodPlan } from "../models/hotelSubMasterModal.js";
 import AdditionalCharges from "../models/additionalChargesModel.js";
 import { recalculateKotItem, round2 } from "../helpers/restaurantHelper.js";
 import Settlement from "../models/settlementModel.js";
+import { sendMail } from "../helpers/hotelHelper.js";
 // Helper functions (you may need to create these or adjust based on your existing ones)
 import {
   buildDatabaseFilterForRoom,
@@ -32,6 +33,8 @@ import VoucherSeriesModel from "../models/VoucherSeriesModel.js";
 import { CheckIn } from "../models/bookingModal.js";
 import { response } from "express";
 import receiptModel from "../models/receiptModel.js";
+import primaryUserModel from "../models/primaryUserModel.js";
+import ExcelJS from "exceljs";
 // Add Item Controller
 export const addItem = async (req, res) => {
   const session = await mongoose.startSession();
@@ -128,7 +131,7 @@ export const addItem = async (req, res) => {
 export const getItems = async (req, res) => {
   try {
     const params = extractRequestParams(req);
-    const filter = buildDatabaseFilterForRoom(params);
+    const filter = await buildDatabaseFilterForRoom(params);
 
     const { items, totalItems } = await fetchRoomsFromDatabase(filter, params);
 
@@ -152,7 +155,7 @@ export const getItems = async (req, res) => {
 export const getAllItems = async (req, res) => {
   try {
     const params = extractRequestParams(req);
-    const filter = buildDatabaseFilterForRoom(params);
+    const filter = await buildDatabaseFilterForRoom(params);
 
     // Pagination
     const page = parseInt(req.query.page) || 1;
@@ -680,13 +683,17 @@ export const getKot = async (req, res) => {
 export const getKotDash = async (req, res) => {
   try {
     const { cmp_id } = req.params;
-    let { date } = req.query;
+    let { date, fromDate } = req.query;
 
     if (!date) {
       date = new Date().toISOString().slice(0, 10);
     }
 
-    const start = new Date(`${date}T00:00:00.000Z`);
+    if (!fromDate) {
+      fromDate = new Date().toISOString().slice(0, 10);
+    }
+
+    const start = new Date(`${fromDate}T00:00:00.000Z`);
     const end = new Date(`${date}T23:59:59.999Z`);
 
     const kot = await kotModal
@@ -705,73 +712,94 @@ export const getKotDash = async (req, res) => {
       })
       .lean();
 
-    const recalculatedKot = await Promise.all(
-      kot.map(async (kotDoc) => {
-        const findSpecificSale = await salesModel.findOne({
-          cmp_id,
-          "convertedFrom.voucherNumber": kotDoc.voucherNumber,
-        });
-        if (kotDoc.paymentCompleted) {
-          return {
-            ...kotDoc,
-            items: kotDoc.items || [], // ← directly from DB, no recalculation
-            total: kotDoc.total || 0, // ← directly from DB
-            salesNumber: findSpecificSale?.salesNumber,
-          };
-        }
-        const recalculatedItems = (kotDoc?.items || [])
-          .map((item) => recalculateKotItem(item))
-          .filter(Boolean);
+    const voucherNumbers = [
+      ...new Set(kot.map((kotDoc) => kotDoc.voucherNumber).filter(Boolean)),
+    ];
 
-        const kotTotal = recalculatedItems.reduce(
-          (sum, item) => sum + Number(item?.total || 0),
-          0,
-        );
+    const sales = voucherNumbers.length
+      ? await salesModel
+          .find({
+            cmp_id,
+            "convertedFrom.voucherNumber": { $in: voucherNumbers },
+          })
+          .select("subTotal salesNumber convertedFrom.voucherNumber")
+          .lean()
+      : [];
 
-        const totalTaxableAmount = recalculatedItems.reduce(
-          (sum, item) => sum + Number(item?.taxableAmount || 0),
-          0,
-        );
+    const salesByVoucherNumber = new Map();
+    sales.forEach((sale) => {
+      (Array.isArray(sale.convertedFrom) ? sale.convertedFrom : []).forEach(
+        (convertedFrom) => {
+          const voucherNumber = convertedFrom?.voucherNumber;
+          if (voucherNumber && !salesByVoucherNumber.has(voucherNumber)) {
+            salesByVoucherNumber.set(voucherNumber, sale);
+          }
+        },
+      );
+    });
 
-        const totalCgstAmt = recalculatedItems.reduce(
-          (sum, item) => sum + Number(item?.totalCgstAmt || 0),
-          0,
-        );
-
-        const totalSgstAmt = recalculatedItems.reduce(
-          (sum, item) => sum + Number(item?.totalSgstAmt || 0),
-          0,
-        );
-
-        const totalIgstAmt = recalculatedItems.reduce(
-          (sum, item) => sum + Number(item?.totalIgstAmt || 0),
-          0,
-        );
-
-        const totalCessAmt = recalculatedItems.reduce(
-          (sum, item) => sum + Number(item?.totalCessAmt || 0),
-          0,
-        );
-
-        const totalAddlCessAmt = recalculatedItems.reduce(
-          (sum, item) => sum + Number(item?.totalAddlCessAmt || 0),
-          0,
-        );
-
+    const recalculatedKot = kot.map((kotDoc) => {
+      const findSpecificSale = salesByVoucherNumber.get(kotDoc.voucherNumber);
+      if (kotDoc.paymentCompleted) {
         return {
           ...kotDoc,
-          items: recalculatedItems,
-          total: round2(kotTotal),
-          taxableAmount: round2(totalTaxableAmount),
-          totalCgstAmt: round2(totalCgstAmt),
-          totalSgstAmt: round2(totalSgstAmt),
-          totalIgstAmt: round2(totalIgstAmt),
-          totalCessAmt: round2(totalCessAmt),
-          totalAddlCessAmt: round2(totalAddlCessAmt),
+          items: kotDoc.items || [], // ← directly from DB, no recalculation
+          total: findSpecificSale?.subTotal || 0, // ← directly from DB
           salesNumber: findSpecificSale?.salesNumber,
         };
-      }),
-    );
+      }
+      const recalculatedItems = (kotDoc?.items || [])
+        .map((item) => recalculateKotItem(item))
+        .filter(Boolean);
+
+      const kotTotal = recalculatedItems.reduce(
+        (sum, item) => sum + Number(item?.total || 0),
+        0,
+      );
+
+      const totalTaxableAmount = recalculatedItems.reduce(
+        (sum, item) => sum + Number(item?.taxableAmount || 0),
+        0,
+      );
+
+      const totalCgstAmt = recalculatedItems.reduce(
+        (sum, item) => sum + Number(item?.totalCgstAmt || 0),
+        0,
+      );
+
+      const totalSgstAmt = recalculatedItems.reduce(
+        (sum, item) => sum + Number(item?.totalSgstAmt || 0),
+        0,
+      );
+
+      const totalIgstAmt = recalculatedItems.reduce(
+        (sum, item) => sum + Number(item?.totalIgstAmt || 0),
+        0,
+      );
+
+      const totalCessAmt = recalculatedItems.reduce(
+        (sum, item) => sum + Number(item?.totalCessAmt || 0),
+        0,
+      );
+
+      const totalAddlCessAmt = recalculatedItems.reduce(
+        (sum, item) => sum + Number(item?.totalAddlCessAmt || 0),
+        0,
+      );
+
+      return {
+        ...kotDoc,
+        items: recalculatedItems,
+        total: round2(kotTotal),
+        taxableAmount: round2(totalTaxableAmount),
+        totalCgstAmt: round2(totalCgstAmt),
+        totalSgstAmt: round2(totalSgstAmt),
+        totalIgstAmt: round2(totalIgstAmt),
+        totalCessAmt: round2(totalCessAmt),
+        totalAddlCessAmt: round2(totalAddlCessAmt),
+        salesNumber: findSpecificSale?.salesNumber,
+      };
+    });
 
     res.status(200).json({
       success: true,
@@ -790,8 +818,8 @@ export const cancelKot = async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
-console.log("req.sUserId =>", req.sUserId);
-console.log("req.suser =>", req.suser);
+    console.log("req.sUserId =>", req.sUserId);
+    console.log("req.suser =>", req.suser);
     const kot = await kotModal.findByIdAndUpdate(
       id,
       {
@@ -800,13 +828,42 @@ console.log("req.suser =>", req.suser);
         cancelledAt: new Date(),
         cancelledBy: req.sUserId,
         cancelledByName: req.suser?.name || "",
-
       },
       { new: true },
     );
 
     if (!kot) {
       return res.status(404).json({ success: false, message: "KOT not found" });
+    }
+    if (kot.status === "cancelled") {
+      let primaryUserData = await primaryUserModel.findById(req.owner);
+      if (!primaryUserData || !primaryUserData?.email) {
+        res.status(200).json({
+          success: true,
+          message: "KOT cancelled successfully but email not sent",
+          data: kot,
+        });
+      }
+      console.log("req?.secUserName ", req?.secUserName);
+      await sendMail({
+        to: primaryUserData?.email,
+        cc: [],
+        subject: `KOT Cancelled Alert - ${kot.voucherNumber}`,
+        fromName: "Cancel Kot",
+        text: `KOT ${kot.voucherNumber} has been cancelled by ${req?.secUserName || primaryUserData?.userName || "System"}. Please check the attached cancelled KOT copy.`,
+        html: `
+    <div style="font-family: Arial, sans-serif;">
+      <h2 style="color:#b91c1c;">KOT Cancelled Alert</h2>
+      <p>KOT <strong>${kot.voucherNumber}</strong> has been cancelled.</p>
+      <p><strong>Cancelled By:</strong> ${req?.secUserName || primaryUserData?.userName || "System"}</p>
+      <p><strong>Reason:</strong> ${reason || "Reason not given"}</p>
+      <p><strong>Table No:</strong> ${kot?.tableNumber || ""}</p>
+      <p><strong>Total:</strong> ₹ ${kot?.total || 0}</p>
+      
+    </div>
+  `,
+        data: kot,
+      });
     }
 
     res.status(200).json({
@@ -893,7 +950,7 @@ export const getRoomDataForRestaurant = async (req, res) => {
     // Get all records for cmp_id
     const allData = await CheckIn.find({
       cmp_id: req.params.cmp_id,
-     status: { $nin: ["checkOut", "cancelled"] }
+      status: { $nin: ["checkOut", "cancelled"] },
     });
 
     // Filter only those where today's date falls between arrivalDate & checkOutDate
@@ -1191,7 +1248,6 @@ export const directSale = async (req, res) => {
 
       let additionalChargesArray = additionalCharges;
 
-      
       // Create a sales voucher entry (no KOT reference)
       const savedVoucherData = await createSalesVoucher(
         cmp_id,
@@ -1210,10 +1266,8 @@ export const directSale = async (req, res) => {
         false,
         false,
         false,
-        false
+        false,
       );
-
-
 
       // ✅ Convert Mongoose document to plain object and ensure _id is included
       const salesRecordData = savedVoucherData[0].toObject
@@ -1275,6 +1329,67 @@ export const updateKotPayment = async (req, res) => {
 
       if (!paymentDetails || !kotData) {
         throw new Error("Missing payment details or KOT data");
+      }
+
+      // Re-check on the server because the guest could check out after the
+      // operator has opened the payment preview.
+      if (isPostToRoom) {
+        const checkInNumbers = [
+          ...new Set(
+            (kotData?.voucherNumber || [])
+              .map((kot) => kot?.checkInNumber)
+              .filter(Boolean),
+          ),
+        ];
+
+        const activeCheckIns = await CheckIn.find({
+          cmp_id,
+          voucherNumber: { $in: checkInNumbers },
+          status: { $nin: ["checkOut", "cancelled"] },
+        })
+          .select("voucherNumber selectedRooms")
+          .session(session);
+
+        if (
+          checkInNumbers.length === 0 ||
+          activeCheckIns.length !== checkInNumbers.length
+        ) {
+          throw new Error(
+            "The room has already been checked out. Post to Room is unavailable.",
+          );
+        }
+
+        const activeCheckInsByVoucher = new Map(
+          activeCheckIns.map((checkIn) => [
+            String(checkIn.voucherNumber),
+            checkIn,
+          ]),
+        );
+        const kotIds = (kotData?.voucherNumber || [])
+          .map((kot) => kot?.id)
+          .filter((id) => mongoose.Types.ObjectId.isValid(id));
+        const kots = await kotModal
+          .find({ cmp_id, _id: { $in: kotIds } })
+          .select("roomId checkInNumber")
+          .session(session);
+
+        const includesCheckedOutRoom = kots.some((kot) => {
+          const checkIn = activeCheckInsByVoucher.get(
+            String(kot.checkInNumber),
+          );
+          const room = checkIn?.selectedRooms?.find(
+            (selectedRoom) =>
+              String(selectedRoom?.roomId) === String(kot.roomId),
+          );
+
+          return !room || room.isCheckedOut;
+        });
+
+        if (kots.length !== kotIds.length || includesCheckedOutRoom) {
+          throw new Error(
+            "The room has already been checked out. Post to Room is unavailable.",
+          );
+        }
       }
 
       if (paymentDetails?.paymentMode === "credit") {
@@ -1407,8 +1522,16 @@ export const updateKotPayment = async (req, res) => {
       }
       console.log(paymentMethod, "paymentMethod");
 
-      if (!isPostToRoom && kotData?.voucherNumber[0]?.checkInNumber && paymentMethod !== "credit") {
-        let totalAmount = paymentSplittingArray.reduce((acc,item)=> item.type == "credit" ? acc : acc + Number(item.amount), 0)
+      if (
+        !isPostToRoom &&
+        kotData?.voucherNumber[0]?.checkInNumber &&
+        paymentMethod !== "credit"
+      ) {
+        let totalAmount = paymentSplittingArray.reduce(
+          (acc, item) =>
+            item.type == "credit" ? acc : acc + Number(item.amount),
+          0,
+        );
         tallyData = await createTallyEntry(
           cmp_id,
           req,
@@ -1424,7 +1547,7 @@ export const updateKotPayment = async (req, res) => {
         if (paymentSplittingArray && paymentSplittingArray?.length > 0) {
           // One receipt per split row
           for (const split of paymentSplittingArray) {
-            console.log("splitsplit",split)
+            console.log("splitsplit", split);
             if (split.type == "credit") continue;
             let receipt = await buildReceipt({
               cmp_id,
@@ -1457,7 +1580,7 @@ export const updateKotPayment = async (req, res) => {
               req,
               session,
             });
-            console.log("split",split)
+            console.log("split", split);
 
             await Settlement.create({
               voucherNumber: receipt.receiptNumber,
@@ -2018,10 +2141,11 @@ async function createSalesVoucher(
   // console.log("additionalChargesArray", additionalChargesArray);
   // ✅ FIXED: Use SUBTOTAL (BEFORE discount)
   const originalTotal = Number(kotData?.subtotal || kotData?.total || 0); // 1000 ✅
-  const additionalCharges = additionalChargesArray?.length > 0 ? additionalChargesArray : [];
+  const additionalCharges =
+    additionalChargesArray?.length > 0 ? additionalChargesArray : [];
   const isComplimentary = req.body.isComplimentary || false;
   const isPostToRoom = req.body.isPostToRoom || false;
-  const saleDate = req.body?.selectedSaleDate || new Date()
+  const saleDate = req.body?.selectedSaleDate || new Date();
 
   console.log("kotData", paymentSplittingArray);
   // ✅ Calculate totals
@@ -4422,12 +4546,37 @@ export const getRestaurantBillsDetails = async (req, res) => {
         checkInNumber: { $in: checkInNumbers },
       })
       .lean();
+    const kotNumbers = generatedKots.map((kot) => kot.voucherNumber);
+
+    const sales = await salesModel
+      .find({
+        cmp_id,
+        "convertedFrom.voucherNumber": { $in: kotNumbers },
+      })
+      .lean();
+
+    // Create a lookup map: voucherNumber -> sale
+    const salesMap = new Map();
+
+    sales.forEach((sale) => {
+      sale.convertedFrom.forEach((item) => {
+        salesMap.set(item.voucherNumber, sale.salesNumber);
+      });
+    });
+
+    console.log("salesMap", salesMap);
+
+    // Add salesNumber to each KOT
+    const updatedGeneratedKots = generatedKots.map((kot) => ({
+      ...kot,
+      salesNumber: salesMap.get(kot.voucherNumber) || null, // or saleNumber field if that's what you store
+    }));
 
     return res.status(200).json({
       success: true,
       message: "Data fetched successfully",
-      count: generatedKots.length,
-      data: generatedKots,
+      count: updatedGeneratedKots.length,
+      data: updatedGeneratedKots,
     });
   } catch (error) {
     console.error("Error in getRestaurantBillsDetails:", error);
@@ -4504,11 +4653,11 @@ export const transferKotBills = async (req, res) => {
         await salesModel.updateOne(
           {
             cmp_id,
-            "convertedFrom.0.voucherNumber": bill.billNo,
+            "convertedFrom.voucherNumber": bill.billNo,
           },
           {
             $set: {
-              "convertedFrom.0.checkInNumber": targetRoom.checkInNo,
+              "convertedFrom.$[].checkInNumber": targetRoom.checkInNo,
               party: party,
               partyAccount: party.accountGroupName,
             },
@@ -4532,3 +4681,298 @@ export const transferKotBills = async (req, res) => {
 };
 
 // function used to delete advance for hotel rooms
+
+
+export const exportItemsToExcel = async (req, res) => {
+  try {
+    const { cmp_id } = req.params;
+    const { under } = req.query;
+
+    const filter = {
+      cmp_id,
+    };
+
+    if (req.owner) {
+      filter.Primary_user_id = req.owner;
+    }
+
+    if (under) {
+      const categories = await Category.find({
+        cmp_id,
+        ...(req.owner && { Primary_user_id: req.owner }),
+        under,
+      })
+        .select("_id")
+        .lean();
+
+      filter.category = {
+        $in: categories.map((category) => category._id),
+      };
+    }
+
+   const items = await productModel
+  .find(filter)
+  .populate({
+    path: "Priceleveles.pricelevel",
+    model: "PriceLevel",
+    select: "pricelevel dineIn takeaway roomService delivery",
+  })
+  .populate({
+    path: "category",
+    model: "Category",
+    select: "category",
+  })
+  .populate({
+    path: "sub_category",
+    model: "Subcategory",
+    select: "subcategory",
+  })
+  .sort({ product_name: 1 })
+  .lean();
+
+
+    if (!items || items.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No items were found matching the criteria",
+      });
+    }
+
+    const workbook = new ExcelJS.Workbook();
+
+    const worksheet = workbook.addWorksheet("Items Price Levels");
+
+    worksheet.columns = [
+      {
+        header: "Item ID",
+        key: "itemId",
+        width: 28,
+      },
+      {
+        header: "Product Name",
+        key: "productName",
+        width: 30,
+      },
+      {
+        header: "Category",
+        key: "category",
+        width: 15,
+      },
+         {
+        header: "Sub Category",
+        key: "subCategory",
+        width: 15,
+      },
+         {
+        header: "HSN Code",
+        key: "hsnCode",
+        width: 15,
+      },
+      {
+        header: "Price Rate",
+        key: "priceRate",
+        width: 12,
+      },
+      {
+        header: "Dine In",
+        key: "dineIn",
+        width: 12,
+      },
+      {
+        header: "Take Away",
+        key: "takeAway",
+        width: 12,
+      },
+      {
+        header: "Room Service",
+        key: "roomService",
+        width: 15,
+      },
+      {
+        header: "Delivery",
+        key: "delivery",
+        width: 12,
+      },
+    ];
+
+    items.forEach((item) => {
+      let priceRate = 0;
+      let dineIn = 0;
+      let takeAway =0;
+      let roomService = 0;
+      let delivery = 0;
+
+
+      item.Priceleveles?.forEach((pl) => {
+        const level = pl?.pricelevel || {};
+        if(item.product_name == "WHITE GRAPE SEEDLESS 100GM"){
+          console.log("placed",pl)
+          console.log("placedThen",level)
+        }
+        if (
+          !level.dineIn &&
+          !level.takeaway &&
+          !level.roomService &&
+          !level.delivery
+        ) {
+          console.log("levelRound",level)
+          priceRate = pl?.pricerate ?? "";
+        }
+
+        if (level.dineIn === "enabled") {
+          dineIn = pl?.pricerate ?? "";
+        }
+
+        if (level.takeaway === "enabled") {
+          takeAway = pl?.pricerate ?? "";
+        }
+
+        if (level.roomService === "enabled") {
+          roomService = pl?.pricerate ?? "";
+        }
+
+        if (level.delivery === "enabled") {
+          delivery = pl?.pricerate ?? "";
+        }
+      });
+
+      worksheet.addRow({
+        itemId: item?._id?.toString() || "",
+        productName: item?.product_name || "",
+        hsnCode: item?.hsn_code || "",
+        category: item?.category?.category || "",
+        subCategory : item?.sub_category?.subcategory || "",
+        priceRate,
+        dineIn,
+        takeAway,
+        roomService,
+        delivery,
+      });
+    });
+
+    // Header styling
+    const headerRow = worksheet.getRow(1);
+
+    headerRow.font = {
+      bold: true,
+    };
+
+    headerRow.alignment = {
+      vertical: "middle",
+      horizontal: "center",
+    };
+
+    // Make price columns numeric
+    worksheet.getColumn("priceRate").numFmt = "0.00";
+    worksheet.getColumn("dineIn").numFmt = "0.00";
+    worksheet.getColumn("takeAway").numFmt = "0.00";
+    worksheet.getColumn("roomService").numFmt = "0.00";
+    worksheet.getColumn("delivery").numFmt = "0.00";
+
+    const timestamp = new Date()
+      .toISOString()
+      .split("T")[0];
+
+    const fileName = `Items_Price_Levels_${timestamp}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${fileName}"`
+    );
+
+    await workbook.xlsx.write(res);
+
+    res.end();
+  } catch (error) {
+    console.error("Export items Excel error:", error);
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        success: false,
+        message: "Failed to export items",
+      });
+    }
+  }
+}
+
+
+export const savePrinter = async (req, res) => {
+  try {
+    const { printer, printerType, remove } = req.body;
+    const removingPrinter = remove === true;
+    const { cmp_id } = req.params;
+
+    // Validate company id
+    if (!cmp_id || cmp_id === "undefined") {
+      return res.status(400).json({
+        success: false,
+        message: "Company id not found",
+      });
+    }
+
+    // Validate printer
+    if (!removingPrinter && (typeof printer !== "string" || !printer.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select printer",
+      });
+    }
+
+    // Validate printer type
+    if (!printerType) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select printer type",
+      });
+    }
+
+    let updatedOrganization;
+
+    if (printerType === "kot") {
+      updatedOrganization = await Organization.findByIdAndUpdate(
+        cmp_id,
+        {
+          $set: {
+            "configurations.0.kotPrinter": removingPrinter ? "" : printer.trim(),
+          },
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      );
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid printer type",
+      });
+    }
+
+    // Company not found
+    if (!updatedOrganization) {
+      return res.status(404).json({
+        success: false,
+        message: "Organization not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: removingPrinter ? "Printer removed successfully" : "Printer saved successfully",
+      data: updatedOrganization,
+    });
+  } catch (error) {
+    console.error("savePrinter error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to save printer",
+      error: error.message,
+    });
+  }
+};

@@ -37,12 +37,14 @@ const tallySchema = new mongoose.Schema(
     from: { type: String },
     classification: { type: String },
     paymenttypeDetails: {
-      cash: { type: String, default: '0' },
-      bank: { type: String, default: '0' },
-      upi: { type: String, default: '0' },
-      credit: { type: String, default: '0' },
-      card: { type: String, default: '0' }
+      cash: { type: String, default: "0" },
+      bank: { type: String, default: "0" },
+      upi: { type: String, default: "0" },
+      credit: { type: String, default: "0" },
+      card: { type: String, default: "0" },
     },
+    // Cached total of active Adjustment allocations; updated in the same transaction.
+    adjustmentAmount: { type: Number, default: 0, min: 0 },
     appliedReceipts: [
       {
         _id: { type: mongoose.Schema.Types.ObjectId, ref: "Receipt" },
@@ -60,16 +62,17 @@ const tallySchema = new mongoose.Schema(
         date: { type: Date },
       },
     ],
-
+    paymentId: {
+      type: mongoose.Schema.Types.ObjectId,
+    },
     createdBy: { type: String, default: "" }, ///if an outstanding is createdBy any vouchers are tagged here
     isCancelled: { type: Boolean, default: false },
     cantChange: { type: Boolean, default: false },
   },
   {
     timestamps: true,
-  }
+  },
 );
-
 
 // ============= CRITICAL TALLY INDEXES FOR YOUR PARTYLIST QUERY =============
 
@@ -80,12 +83,12 @@ tallySchema.index(
     Primary_user_id: 1,
     party_id: 1,
     isCancelled: 1,
-    classification: 1
+    classification: 1,
   },
   {
     name: "tally_outstanding_main_idx",
-    background: true
-  }
+    background: true,
+  },
 );
 
 // **SECONDARY** - For receipt/payment voucher filtering
@@ -94,12 +97,12 @@ tallySchema.index(
     cmp_id: 1,
     Primary_user_id: 1,
     isCancelled: 1,
-    source: 1
+    source: 1,
   },
   {
     name: "tally_source_filter_idx",
-    background: true
-  }
+    background: true,
+  },
 );
 
 // **AGGREGATION OPTIMIZATION** - For your $group operations
@@ -107,12 +110,12 @@ tallySchema.index(
   {
     party_id: 1,
     bill_pending_amt: 1,
-    bill_date: -1
+    bill_date: -1,
   },
   {
     name: "tally_aggregation_idx",
-    background: true
-  }
+    background: true,
+  },
 );
 
 // Keep your existing indexes but add these optimizations
@@ -142,7 +145,7 @@ tallySchema.index({
   party_id: 1,
   isCancelled: 1,
   bill_pending_amt: 1,
-  bill_date: -1
+  bill_date: -1,
 });
 
 // Create a Mongoose model based on the schema

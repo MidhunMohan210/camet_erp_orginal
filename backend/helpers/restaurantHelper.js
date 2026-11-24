@@ -2,6 +2,7 @@ import productModel from "../models/productModel.js";
 import restaurantModels from "../models/restaurantModels.js";
 import roomModal from "../models/roomModal.js";
 import product from "../models/productModel.js";
+import { Category } from "../models/subDetails.js";
 import VoucherSeriesModel from "../models/VoucherSeriesModel.js";
 import { generateVoucherNumber } from "../helpers/voucherHelper.js";
 import { getNewSerialNumber } from "../helpers/secondaryHelper.js";
@@ -9,11 +10,26 @@ import ReceiptModel from "../models/receiptModel.js";
 import Party from "../models/partyModel.js";
 import { formatToLocalDate } from "./helper.js";
 
-export const buildDatabaseFilterForRoom = (params) => {
+
+export const buildDatabaseFilterForRoom = async (params) => {
   const filter = {
     cmp_id: params.cmp_id,
     Primary_user_id: params.Primary_user_id,
   };
+
+  if (params.under) {
+    const categories = await Category.find({
+      cmp_id: params.cmp_id,
+      Primary_user_id: params.Primary_user_id,
+      under: params.under,
+    })
+      .select("_id")
+      .lean();
+
+    filter.category = {
+      $in: categories.map((category) => category._id),
+    };
+  }
 
   if (params.searchTerm) {
     filter.$or = [
@@ -399,3 +415,6 @@ export const buildSplitReceiptsForRestaurant = async ({
 
   return createdReceipts;
 };
+
+
+;

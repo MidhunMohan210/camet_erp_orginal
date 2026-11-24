@@ -18,6 +18,10 @@ import { removeAllSales } from "../../../slices/salesSecondary";
 import { removeAll as removeAllStock } from "../../../slices/stockTransferSecondary";
 import { removeAll as removeAllPurchase } from "../../../slices/purchase";
 import { removeAll as removeAllCredit } from "../../../slices/creditNote";
+import {
+  storingPermissions,
+  storingUserType,
+} from "../../../slices/permissionSlice";
 import CametHead from "../sidebar/CametHead";
 import ProfileSection from "../sidebar/ProfileSection";
 import { FaHome } from "react-icons/fa";
@@ -30,8 +34,10 @@ import { IoMdPower } from "react-icons/io";
 import { BsFillBuildingsFill } from "react-icons/bs";
 import { SlUserFollow } from "react-icons/sl";
 import LogoutModal from "../common/modal/LogoutModal";
+import { isAdminUser } from "@/utils/permissions";
+import SubscriptionExpiryAlert from "@/components/common/SubscriptionExpiryAlert";
 
-function SidebarSec({ showBar }) {
+function SidebarSec({ showBar, hideOnDesktop = false }) {
   const [showSidebar, setShowSidebar] = useState(false);
   const [userData, setUserData] = useState({});
   const [dropdown, setDropdown] = useState(false);
@@ -42,6 +48,10 @@ function SidebarSec({ showBar }) {
   const [open, setOpen] = useState(true);
   const [showLogoutModal, setShowLogoutModal] = useState(false);
   const selectedTab = localStorage.getItem("selectedSecondatSidebarTab");
+  const storedUserData = JSON.parse(localStorage.getItem("sUserData"));
+  const permission = useSelector((state) => state?.permissionData?.permissions);
+
+  console.log(storedUserData);
 
   const [tab, setTab] = useState(selectedTab);
   const navigate = useNavigate();
@@ -65,6 +75,17 @@ function SidebarSec({ showBar }) {
     };
   }, [sidebarRef, setShowSidebar]);
 
+  // const canAccess = useCallback(
+  //   (path) =>
+  //     canAccessPath({
+  //       pathname: path,
+  //       user: userData?._id ? userData : storedUserData,
+  //       permissions:
+  //         userData?.permissions || storedUserData?.permissions || storedPermissions || {},
+  //     }),
+  //   [storedPermissions, storedUserData, userData]
+  // );
+
   const navItems = [
     {
       to: "/sUsers/dashboard",
@@ -74,7 +95,7 @@ function SidebarSec({ showBar }) {
     },
   ];
 
-  if (role === "admin") {
+  if (isAdminUser({ role })) {
     navItems.push(
       {
         to: "/sUsers/company/list",
@@ -121,14 +142,22 @@ function SidebarSec({ showBar }) {
     },
   ];
 
-  if (companies && companies.length > 0 && org.isApproved === true) {
+  if (
+    companies &&
+    companies.length > 0 &&
+    org.isApproved === true 
+    // canAccess("/sUsers/settings")
+  ) {
     const additionalTabs = [];
+    {(permission?.settings || storedUserData?.role === "admin") && 
+  
     additionalTabs.push({
       to: "/sUsers/settings",
       tab: "terms",
       icon: <IoMdSettings />,
       label: "Settings",
-    });
+    })
+    }
 
     additionalTabs.forEach((item) => {
       navItems.push(item);
@@ -143,13 +172,30 @@ function SidebarSec({ showBar }) {
 
       const { userData } = res.data.data;
 
-      setUserData(userData);
-      setCompanies(userData?.organization);
-      setRole(userData?.role || "user");
+      // This endpoint does not include subscription status. Preserve the
+      // status received at login so the dashboard popup/sidebar reminder is
+      // not lost when the sidebar refreshes the user profile.
+      const loggedInUser = JSON.parse(localStorage.getItem("sUserData") || "null");
+      const userDataWithSubscription = {
+        ...userData,
+        subscription: userData?.subscription || loggedInUser?.subscription,
+      };
+
+      setUserData(userDataWithSubscription);
+      setCompanies(userDataWithSubscription?.organization);
+      setRole(userDataWithSubscription?.role || "user");
+      localStorage.setItem("sUserData", JSON.stringify(userDataWithSubscription));
+      localStorage.setItem(
+        "permissions",
+        JSON.stringify(userDataWithSubscription?.permissions || {})
+      );
+      localStorage.setItem("userType", userDataWithSubscription?.userType || "");
+      dispatch(storingPermissions(userDataWithSubscription?.permissions || {}));
+      dispatch(storingUserType(userDataWithSubscription?.userType || null));
 
       if (!prevOrg) {
-        setOrg(userData?.organization[0]);
-        dispatch(setSecSelectedOrganization(userData?.organization[0]));
+        setOrg(userDataWithSubscription?.organization[0]);
+        dispatch(setSecSelectedOrganization(userDataWithSubscription?.organization[0]));
       } else {
         setOrg(prevOrg);
       }
@@ -163,10 +209,11 @@ function SidebarSec({ showBar }) {
   }, [refreshOrganizations]);
 
   useEffect(() => {
-    if (window.innerWidth < 768) {
-      setShowSidebar(!showSidebar);
+    const isCompactPosScreen = hideOnDesktop && window.innerWidth < 1280;
+    if (isCompactPosScreen || window.innerWidth < 768) {
+      setShowSidebar(showBar);
     }
-  }, [showBar]);
+  }, [showBar, hideOnDesktop]);
 
   useEffect(() => {
     if (window.innerWidth < 768) {
@@ -175,7 +222,7 @@ function SidebarSec({ showBar }) {
   }, []);
 
   const handleSidebarItemClick = (newTab) => {
-    if (window.innerWidth < 768) {
+    if (hideOnDesktop || window.innerWidth < 768) {
       setShowSidebar(false);
     }
 
@@ -323,7 +370,9 @@ function SidebarSec({ showBar }) {
         className={`${
           showSidebar
             ? "z-50 absolute h-[125vh] transform translate-x-0"
-            : "-translate-x-full md:translate-x-0 z-50 absolute md:relative"
+            : hideOnDesktop
+              ? "-translate-x-full xl:translate-x-0 z-50 absolute xl:relative"
+              : "-translate-x-full md:translate-x-0 z-50 absolute md:relative"
         } ${
           open ? "w-64" : "w-28"
         } transition-all duration-700 ease-in-out flex flex-col h-screen p-1 bg-[#0b1d34] overflow-y-auto overflow-x-hidden scrollbar-thin scrollbar-track-[#0B1D34] scrollbar-thumb-[#30435e]`}
@@ -346,6 +395,8 @@ function SidebarSec({ showBar }) {
           handleLogout={handleLogoutClick}
           open={open}
         />
+
+        {open && <SubscriptionExpiryAlert user={storedUserData} variant="sidebar" />}
 
         {/* Main content area - this will take up remaining space */}
         <div className="flex flex-col flex-1 my-3">
@@ -460,7 +511,7 @@ function SidebarSec({ showBar }) {
 
           <div className="flex flex-col items-center px-4 bg-gray-700 py-1">
             <h3 className="text-[10px] text-gray-400 tracking-widest text-center">
-              Version 0.0.9
+              Version 0.0.11
             </h3>
           </div>
         </div>

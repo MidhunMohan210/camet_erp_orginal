@@ -26,9 +26,8 @@ function DashBoardLayout({
             onClick={handleToggleSidebar}
             className="block md:hidden text-3xl"
           />
-          <p>Dashboard</p>
+          <p>DashBoard</p>
         </div>
-
         {/* company name */}
 
         <div className="  bg-white shadow-lg p-2  flex items-center gap-3 mb-2 ">

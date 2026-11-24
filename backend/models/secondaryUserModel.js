@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 const secondaryUserSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
-    email: { type: String },
+    email: { type: String, required: true, trim: true, lowercase: true },
     mobile: { type: Number },
     password: { type: String },
     organization: [
@@ -15,12 +15,60 @@ const secondaryUserSchema = new mongoose.Schema(
     otp: { type: Number },
     permissions: {
       type: Object,
-      default: () => ({}),
+      default: () => ({
+        hotelManagement: true,
+        restaurantManagement: true,
+        voucher: true,
+        reports: true,
+
+        hotelDashboard: true,
+        bookingList: true,
+        checkinList: true,
+        checkoutList: true,
+        editTariffRate: true,
+        swapRoom: true,
+        roomShift: true,
+        guestLedger: true,
+
+        restaurantDashboard: true,
+        kotPage: true,
+        restaurantPayment: true,
+        restaurantDailySales: true,
+        categoryWiseSales: true,
+        itemWiseSales: true,
+        kotRegister: true,
+        restaurantReceiptReport: true,
+        saleRegister: true,
+
+        hotelReports: true,
+        restaurantReports: true,
+        voucherReports: true,
+
+        dailySalesReport: true,
+        foDailyStatement: true,
+        flashReport: true,
+        paxReport: true,
+        foodPlanReport: true,
+        occupancyReport: true,
+        roomSummaryReport: true,
+        receiptReport: true,
+        travelAgentReport: true,
+        foBillSummary: true,
+        cancellationReport: true,
+        nightAudit: true,
+        cancelBooking:true,
+        cancelChecking: true,
+        cancelSale: true,
+        cancelReceipt: true,
+        settings: true,
+        loginReport: true,
+        editPaymentTypes: false,
+      }),
     },
     userType: {
-  type: String,
-  default: "user",
-},
+      type: String,
+      default: "user",
+    },
     configurations: [
       {
         organization: {
@@ -64,7 +112,7 @@ const secondaryUserSchema = new mongoose.Schema(
             ref: "SubGroup",
           },
         ],
-       
+
         selectedVanSaleSubGroups: { type: Array },
         salesConfiguration: { type: Object },
         salesOrderConfiguration: { type: Object },
@@ -99,8 +147,10 @@ const secondaryUserSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
 );
+
+secondaryUserSchema.index({ email: 1 }, { unique: true, sparse: true, collation: { locale: "en", strength: 2 } });
 
 secondaryUserSchema.pre("save", async function (next) {
   if (!this.isModified("password")) {

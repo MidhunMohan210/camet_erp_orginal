@@ -29,7 +29,7 @@ import {
 } from "react-icons/md";
 import uploadImageToCloudinary from "../../../../utils/uploadCloudinary";
 import { calculateStayDays } from "../Helper/hotelHelper";
-import { set } from "mongoose";
+
 
 const nextIsoDate = (value) => {
   const date = new Date(value);
@@ -72,8 +72,8 @@ function BookingForm({
   const [saveLoader, setSaveLoader] = useState(false);
   const [additionalChargeData, setAdditionalChargeData] = useState([]);
   const [showIdProofModal, setShowIdProofModal] = useState(false);
-  const [defaultPax,setDefaultPax] = useState({})
-  const [defaultFoodPlan,setDefaultFoodPlan] = useState({})
+  const [defaultPax, setDefaultPax] = useState({});
+  const [defaultFoodPlan, setDefaultFoodPlan] = useState({});
   const isSaving = saveLoader || submitLoader || isSubmittingRef.current;
   const idDocsRef = useRef(null);
 
@@ -88,7 +88,7 @@ function BookingForm({
   });
   let addFoodPlanWithRate = configurations?.[0]?.foodPlaWithRoomRate;
   let addPaxWithRate = configurations?.[0]?.additionalPaxWithRoomRate;
-  console.log(addFoodPlanWithRate)
+  console.log(editData);
   let discountBasedOnGrossAmount =
     configurations?.[0]?.discountBasedOnGrossAmountInHotel;
   const tariffMinAllowedDate =
@@ -111,11 +111,11 @@ function BookingForm({
   );
   const [includePaxRateWithRoom, setIncludePaxRateWithRoom] = useState(
     addPaxWithRate ?? false,
-  )
+  );
 
-  console.log("jaiid")
+  console.log("jaiid");
 
-  console.log(addFoodPlanWithRate,includeFoodRateWithRoom)
+  console.log(addFoodPlanWithRate, includeFoodRateWithRoom);
 
   const { data, loading } = useFetch(
     `/api/sUsers/getProductSubDetails/${cmp_id}?type=roomType`,
@@ -124,27 +124,25 @@ function BookingForm({
     if (data) setRoomType(data?.data);
   }, [data]);
 
-const {
-  data: defaultPaxResponse,
-} = useFetch(`/api/sUsers/getDefaultPax/${cmp_id}`);
+  const { data: defaultPaxResponse } = useFetch(
+    `/api/sUsers/getDefaultPax/${cmp_id}`,
+  );
 
-useEffect(() => {
-  if (defaultPaxResponse) {
-    setDefaultPax(defaultPaxResponse.data);
-  }
-}, [defaultPaxResponse]);
+  useEffect(() => {
+    if (defaultPaxResponse) {
+      setDefaultPax(defaultPaxResponse.data);
+    }
+  }, [defaultPaxResponse]);
 
+  const { data: defaultPlanResponse } = useFetch(
+    `/api/sUsers/getDefaultPlan/${cmp_id}`,
+  );
 
-
-const {
-  data: defaultPlanResponse,
-} = useFetch(`/api/sUsers/getDefaultPlan/${cmp_id}`);
-
-useEffect(() => {
-  if (defaultPlanResponse) {
-    setDefaultFoodPlan(defaultPlanResponse.data);
-  }
-}, [defaultPlanResponse]);
+  useEffect(() => {
+    if (defaultPlanResponse) {
+      setDefaultFoodPlan(defaultPlanResponse.data);
+    }
+  }, [defaultPlanResponse]);
 
   const { data: visitOfPurposeData, loading: visitOfPurposeLoading } = useFetch(
     `/api/sUsers/getVisitOfPurpose/${cmp_id}`,
@@ -183,11 +181,16 @@ useEffect(() => {
     bookingType: "offline",
     country: "India",
     state: "Kerala",
-     guestCountry: "India",
-  guestState: "Kerala",
+    guestCountry: "India",
+    guestState: "Kerala",
     pinCode: "",
     detailedAddress: "",
     mobileNumber: "",
+    guestName: "",
+    guestId: "",
+    guestPinCode: "",
+    guestDetailedAddress: "",
+    guestMobileNumber: "",
     selectedRoomPrice: "",
     priceLevelRate: "",
     priceLevelId: "",
@@ -218,85 +221,85 @@ useEffect(() => {
     dateOfExpiry: "",
     grcno: "",
     addTaxWithRate: configurations[0]?.addRateWithTax?.hotelSale,
-    addPaxWithRate:includePaxRateWithRoom,
-    addFoodPlanWithRate:includeFoodRateWithRoom
+    addPaxWithRate: includePaxRateWithRoom,
+    addFoodPlanWithRate: includeFoodRateWithRoom,
   });
 
-useEffect(() => {
-  if (editData) {
-       console.log("editData", editData);
-    setSelectedParty(editData?.customerId);
-    setSelectedGuest(editData?.guestId);
-    setHotelAgent(editData?.agentId);
-    setCountry(editData?.country || "");
-    setVoucherNumber(editData?.voucherNumber);
-    let highestDate = editData?.checkOutDate;
-    if (isTariffRateChange) {
-      highestDate =
-        currentDateDefault > highestDate ? currentDateDefault : highestDate;
-    }
-    setFormData((prev) => ({
-      ...prev,
-      country: editData?.country,
-      customerId: editData?.customerId?._id,
-      voucherNumber: editData?.voucherNumber,
-      state: editData?.state,
-      pinCode: editData?.pinCode,
-      detailedAddress: editData?.detailedAddress,
-      mobileNumber: editData?.mobileNumber,
-      arrivalDate: editData?.arrivalDate || prev.arrivalDate,
-      arrivalTime: editData?.arrivalTime || prev.arrivalTime,
-      checkOutDate: highestDate || prev.checkOutDate,
-      checkOutTime: editData?.checkOutTime || prev.checkOutTime,
-      stayDays: editData?.stayDays ?? prev.stayDays,
-      bookingType: editData?.bookingType || prev.bookingType,
-      selectedRooms: editData?.selectedRooms || [],
-      additionalPaxDetails: editData?.additionalPaxDetails || [],
-      foodPlan: editData?.foodPlan || [],
-      paxTotal: editData?.paxTotal || 0,
-      foodPlanTotal: editData?.foodPlanTotal || 0,
-      roomTotal: editData?.roomTotal || 0,
-      discountPercentage: editData?.discountPercentage || 0,
-      discountAmount: editData?.discountAmount || 0,
-      totalAdvance: editData?.totalAdvance || 0,
-      visitOfPurpose: editData?.visitOfPurpose,
-      voucherId: editData?.voucherId,
-      customerName: editData?.customerId?.partyName,
-      accountGroup: editData?.customerId?.accountGroup,
-      guestName: editData?.guestId?.partyName,
-      guestId: editData?.guestId?._id || editData?.guestId,
-      guestCountry: editData?.guestCountry,
-      guestState: editData?.guestState,
-      guestPinCode: editData?.pinCode,
-      guestDetailedAddress: editData?.guestDetailedAddress,
-      guestMobileNumber: editData?.guestMobileNumber,
-      balanceToPay: editData?.balanceToPay || 0,
-      advanceAmount:  0,
-      previousAdvance: editData?.previousAdvance || 0,
-      company: editData?.company || "",
-      nextDestination: editData?.nextDestination || "",
-      dateOfBirth: editData?.dateOfBirth || "",
-      dateOfArrivalInIndia: editData?.dateOfArrivalInIndia || "",
-      visaNo: editData?.visaNo || "",
-      visaPOI: editData?.visaPOI || "",
-      visaDOI: editData?.visaDOI || "",
-      visaExpDt: editData?.visaExpDt || "",
-      certOfRegistrationNumber: editData?.certOfRegistrationNumber || "",
-      passportNo: editData?.passportNo || "",
-      placeOfIssue: editData?.placeOfIssue || "",
-      dateOfIssue: editData?.dateOfIssue || "",
-      dateOfExpiry: editData?.dateOfExpiry || "",
-      grcno: editData?.grcno || "",
-      currentDate: editData?.arrivalDate || currentDateDefault,
-      updatedDate: editData?.updatedDate || currentDateDefault,
-      gstNo: editData?.gstNo || "",
-      otherChargeDetails: editData?.otherChargeDetails || [],
-      addFoodPlanWithRate: editData?.addFoodPlanWithRate,
-      addPaxWithRate: editData?.addPaxWithRate,
-      roomSwapHistory: editData?.roomSwapHistory || [],
-      addTaxWithRate: editData?.addTaxWithRate || false,
-      // addFoodPlanWithRate: editData?.addFoodPlanWithRate || false,
-    }));
+  useEffect(() => {
+    if (editData) {
+      console.log("editData", editData.selectedRooms[0]?._id);
+      setSelectedParty(editData?.customerId);
+      setSelectedGuest(editData?.guestId);
+      setHotelAgent(editData?.agentId);
+      setCountry(editData?.country || "");
+      setVoucherNumber(editData?.voucherNumber);
+      let highestDate = editData?.checkOutDate;
+      if (isTariffRateChange) {
+        highestDate =
+          currentDateDefault > highestDate ? currentDateDefault : highestDate;
+      }
+      setFormData((prev) => ({
+        ...prev,
+        country: editData?.country,
+        customerId: editData?.customerId?._id,
+        voucherNumber: editData?.voucherNumber,
+        state: editData?.state,
+        pinCode: editData?.pinCode,
+        detailedAddress: editData?.detailedAddress,
+        mobileNumber: editData?.mobileNumber,
+        arrivalDate: editData?.arrivalDate || prev.arrivalDate,
+        arrivalTime: editData?.arrivalTime || prev.arrivalTime,
+        checkOutDate: highestDate || prev.checkOutDate,
+        checkOutTime: editData?.checkOutTime || prev.checkOutTime,
+        stayDays: editData?.stayDays ?? prev.stayDays,
+        bookingType: editData?.bookingType || prev.bookingType,
+        selectedRooms: editData?.selectedRooms || [],
+        additionalPaxDetails: editData?.additionalPaxDetails || [],
+        foodPlan: editData?.foodPlan || [],
+        paxTotal: editData?.paxTotal || 0,
+        foodPlanTotal: editData?.foodPlanTotal || 0,
+        roomTotal: editData?.roomTotal || 0,
+        discountPercentage: editData?.discountPercentage || 0,
+        discountAmount: editData?.discountAmount || 0,
+        totalAdvance: editData?.totalAdvance || 0,
+        visitOfPurpose: editData?.visitOfPurpose,
+        voucherId: editData?.voucherId,
+        customerName: editData?.customerId?.partyName,
+        accountGroup: editData?.customerId?.accountGroup,
+        guestName: editData?.guestId?.partyName,
+        guestId: editData?.guestId?._id || editData?.guestId,
+        guestCountry: editData?.guestCountry,
+        guestState: editData?.guestState,
+        guestPinCode: editData?.pinCode,
+        guestDetailedAddress: editData?.guestDetailedAddress,
+        guestMobileNumber: editData?.guestMobileNumber,
+        balanceToPay: editData?.balanceToPay || 0,
+        advanceAmount: 0,
+        previousAdvance: editData?.previousAdvance || 0,
+        company: editData?.company || "",
+        nextDestination: editData?.nextDestination || "",
+        dateOfBirth: editData?.dateOfBirth || "",
+        dateOfArrivalInIndia: editData?.dateOfArrivalInIndia || "",
+        visaNo: editData?.visaNo || "",
+        visaPOI: editData?.visaPOI || "",
+        visaDOI: editData?.visaDOI || "",
+        visaExpDt: editData?.visaExpDt || "",
+        certOfRegistrationNumber: editData?.certOfRegistrationNumber || "",
+        passportNo: editData?.passportNo || "",
+        placeOfIssue: editData?.placeOfIssue || "",
+        dateOfIssue: editData?.dateOfIssue || "",
+        dateOfExpiry: editData?.dateOfExpiry || "",
+        grcno: editData?.grcno || "",
+        currentDate: editData?.arrivalDate || currentDateDefault,
+        updatedDate: editData?.updatedDate || currentDateDefault,
+        gstNo: editData?.gstNo || "",
+        otherChargeDetails: editData?.otherChargeDetails || [],
+        addFoodPlanWithRate: editData?.addFoodPlanWithRate,
+        addPaxWithRate: editData?.addPaxWithRate,
+        roomSwapHistory: editData?.roomSwapHistory || [],
+        addTaxWithRate: editData?.addTaxWithRate || false,
+        // addFoodPlanWithRate: editData?.addFoodPlanWithRate || false,
+      }));
 
       setIncludeFoodRateWithRoom(editData?.addFoodPlanWithRate);
       setIncludePaxRateWithRoom(editData?.addPaxWithRate);
@@ -376,7 +379,7 @@ useEffect(() => {
 
     if (name === "arrivalDate") {
       const checkout = new Date(value);
-      console.log(checkout)
+      console.log(checkout);
       if (formData.stayDays) {
         checkout.setDate(checkout.getDate() + (Number(formData.stayDays) + 1));
       } else {
@@ -385,17 +388,17 @@ useEffect(() => {
       const formattedCheckout = isoDate(checkout);
       console.log(value, checkout, formattedCheckout);
 
-  const updatedSelectedItems =
+      const updatedSelectedItems =
         formData.selectedRooms?.map((room) => {
           const stayDay = calculateStayDays(
             formData,
             room,
             value,
             checkout,
-             (Number(formData.stayDays) + 1)
+            Number(formData.stayDays) + 1,
           );
 
-          console.log(stayDay)
+          console.log(stayDay);
 
           return {
             ...room,
@@ -404,13 +407,13 @@ useEffect(() => {
           };
         }) ?? [];
 
-        console.log(updatedSelectedItems)
-      
+      console.log(updatedSelectedItems);
+
       setFormData((prev) => ({
         ...prev,
         checkOutDate: formattedCheckout,
         arrivalDate: value,
-        stayDays: formData.stayDays ? Number(formData.stayDays + 1) :1,
+        stayDays: formData.stayDays ? Number(formData.stayDays + 1) : 1,
         selectedRooms: updatedSelectedItems,
         updatedDate: currentDateDefault,
       }));
@@ -431,8 +434,10 @@ useEffect(() => {
             room,
             formData?.arrivalDate,
             checkOutDate,
-            diffDays
+            diffDays,
           );
+
+          console.log(stayDays);
 
           return {
             ...room,
@@ -465,20 +470,19 @@ useEffect(() => {
               room,
               formData?.arrivalDate,
               checkout,
-              stayDays
+              stayDays,
             );
 
-            console.log(stayDays,roomStayDays);
+            console.log(stayDays, roomStayDays);
 
             return {
               ...room,
-              stayDays :roomStayDays,
+              stayDays: roomStayDays,
               totalAmount: roomStayDays * room.priceLevelRate,
             };
           }) || [];
 
-
-          console.log(updatedSelectedItems)
+        console.log(updatedSelectedItems);
         const formattedCheckout = isoDate(checkout);
         setFormData((prev) => ({
           ...prev,
@@ -1010,22 +1014,44 @@ useEffect(() => {
   };
 
   const handleAdditionalPaxDetails = (details, room) => {
-  let filteredDetails =  details.filter((i) => i.paxID !== "" );
-  console.log(filteredDetails,formData?.additionalPaxDetails)
+    let filteredDetails = details.filter((i) => i.paxID !== "");
+
     const existingDetails = Array.isArray(formData?.additionalPaxDetails)
       ? formData.additionalPaxDetails
       : [];
-      
+
     const filterData = existingDetails.filter((i) => i.roomId !== room);
-    const totalAmount = [...filterData, ...filteredDetails].reduce(
+    const totalAmount = filteredDetails.reduce(
       (acc, item) => acc + Number(item.rate),
       0,
     );
+    const selectedRoom = formData?.selectedRooms?.find(
+      (i) => i.roomId === room,
+    );
+
+    if (!selectedRoom) {
+      toast.error("Room not found");
+      return;
+    }
+    let amountWithFoodPlan =
+      totalAmount +
+      (includeFoodRateWithRoom ? selectedRoom.foodPlanAmountWithTax : 0);
+    if (
+      Number(amountWithFoodPlan) > Number(selectedRoom?.priceLevelRate) &&
+      includePaxRateWithRoom
+    ) {
+      setIncludePaxRateWithRoom(formData?.addPaxWithRate);
+      toast.error(
+        "Rate cannot be less than sum of food plan amount or additional pax amount",
+      );
+      return;
+    }
 
     setFormData((prev) => ({
       ...prev,
       additionalPaxDetails: [...filterData, ...filteredDetails],
       paxTotal: totalAmount,
+      addPaxWithRate: includePaxRateWithRoom,
       updatedDate: currentDateDefault,
     }));
   };
@@ -1034,11 +1060,32 @@ useEffect(() => {
     const existingDetails = Array.isArray(formData?.foodPlan)
       ? formData.foodPlan
       : [];
-    const filterData = existingDetails.filter((i) => i.roomId !== room);
-    const totalAmount = [...filterData, ...details].reduce(
+    const filterData = existingDetails.filter((i) => i.roomId != room);
+    const totalAmount = details.reduce(
       (acc, item) => acc + Number(item.rate),
       0,
     );
+    const selectedRoom = formData?.selectedRooms?.find(
+      (i) => i.roomId === room,
+    );
+
+    if (!selectedRoom) {
+      toast.error("Room not found");
+      return;
+    }
+    let amountWithAdditionalPax =
+      totalAmount +
+      (includePaxRateWithRoom ? selectedRoom.additionalPaxAmountWithTax : 0);
+    if (
+      Number(amountWithAdditionalPax) > Number(selectedRoom?.priceLevelRate) &&
+      includeFoodRateWithRoom
+    ) {
+      setIncludeFoodRateWithRoom(formData?.addFoodPlanWithRate);
+      toast.error(
+        "Rate cannot be less than sum of food plan amount or additional pax amount",
+      );
+      return;
+    }
 
     setFormData((prev) => ({
       ...prev,
@@ -1065,7 +1112,7 @@ useEffect(() => {
       setOtherChargeModalOpen(true);
       setSelectedRoomId(id);
     }
-    if(to === "increasePaxCount") {
+    if (to === "increasePaxCount") {
       // setDiscountModalOpen(true);
       setSelectedRoomId(id);
     }
@@ -1074,6 +1121,43 @@ useEffect(() => {
   const handleAgentSelect = (agent) => {
     setHotelAgent(agent);
     setFormData((prev) => ({ ...prev, agentId: agent ? agent._id : "" }));
+  };
+
+  const preserveSelectedRoomIds = (previousRooms = [], nextRooms = []) => {
+    const usedSelectedRoomIds = new Set(
+      nextRooms
+        .map((room) => room?._id && String(room._id))
+        .filter(Boolean),
+    );
+
+    return nextRooms.map((nextRoom) => {
+      if (nextRoom?._id) return nextRoom;
+
+      const matchingRooms = previousRooms.filter((previousRoom) => {
+        const sameRoom =
+          String(previousRoom?.roomId?._id || previousRoom?.roomId || "") ===
+          String(nextRoom?.roomId?._id || nextRoom?.roomId || "");
+        const sameSwapState =
+          Boolean(previousRoom?.isSwapped) === Boolean(nextRoom?.isSwapped);
+        const sameSwapDate =
+          String(previousRoom?.swappingDateFrom || "") ===
+          String(nextRoom?.swappingDateFrom || "");
+
+        return (
+          previousRoom?._id &&
+          !usedSelectedRoomIds.has(String(previousRoom._id)) &&
+          sameRoom &&
+          sameSwapState &&
+          sameSwapDate
+        );
+      });
+
+      if (matchingRooms.length !== 1) return nextRoom;
+
+      const selectedRoomId = String(matchingRooms[0]._id);
+      usedSelectedRoomIds.add(selectedRoomId);
+      return { ...nextRoom, _id: matchingRooms[0]._id };
+    });
   };
 
   const handleAvailableRooms = (rooms, total) => {
@@ -1123,7 +1207,7 @@ useEffect(() => {
 
       setFormData((prev) => ({
         ...prev,
-        selectedRooms: rooms,
+        selectedRooms: preserveSelectedRoomIds(prev.selectedRooms, rooms),
         roomTotal: total,
         updatedDate: currentDateDefault,
       }));
@@ -1224,30 +1308,29 @@ useEffect(() => {
   };
 
   const submitHandler = async () => {
-       if (isSubmittingRef.current) return;
     if (isFormReadOnly || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    // setSaveLoader(true);
     if (!formData.customerName || formData.customerName.trim() === "") {
       toast.error("Please enter a customer name");
+      isSubmittingRef.current = false;
       return;
     }
 
-    
- if (!formData.customerId) {
-    try {
-
-
-      // isSubmittingRef.current = true;
-    setSaveLoader(true);
-      const res = await api.get(`/api/sUsers/PartyList/${cmp_id}`, {
-        params: {
-          page: 1,
-          limit: 50,
-          search: formData.customerName.trim(),
-          voucher: "sale",
-          isAgent: false,
-        },
-        withCredentials: true,
-      });
+    if (!formData.customerId) {
+      try {
+        // isSubmittingRef.current = true;
+        // setSaveLoader(true);
+        const res = await api.get(`/api/sUsers/PartyList/${cmp_id}`, {
+          params: {
+            page: 1,
+            limit: 50,
+            search: formData.customerName.trim(),
+            voucher: "sale",
+            isAgent: false,
+          },
+          withCredentials: true,
+        });
 
         const parties = res?.data?.partyList ?? [];
         const exactMatch = parties.find(
@@ -1261,6 +1344,7 @@ useEffect(() => {
             `Customer "${formData.customerName.trim()}" already exists. Please select from the dropdown instead of typing manually.`,
             { duration: 5000 },
           );
+          isSubmittingRef.current = false;
           return; // ❌ Block save
         }
       } catch (_) {
@@ -1298,6 +1382,7 @@ useEffect(() => {
             `Guest "${formData.guestName.trim()}" already exists. Please select from the dropdown instead of typing manually.`,
             { duration: 5000 },
           );
+          isSubmittingRef.current = false;
           return; // ❌ Block save
         }
       } catch (_) {
@@ -1309,6 +1394,7 @@ useEffect(() => {
       toast.error(
         "Please select at least one room or enter price for selected room",
       );
+      isSubmittingRef.current = false;
       return;
     }
 
@@ -1321,7 +1407,7 @@ useEffect(() => {
     let state = formData.state;
     let pinCode = formData.pinCode;
     let detailedAddress = formData.detailedAddress;
-    let mobileNumber = formData.mobileNumber;
+    let mobileNumber = formData.mobileNumber || formData.guestMobileNumber;
     let guestName = formData?.guestName;
     let guestId = formData?.guestId || "";
     let guestCountry = formData?.guestCountry;
@@ -1343,7 +1429,10 @@ useEffect(() => {
         const dataObject = {
           accountGroup: "",
           partyName: formData.customerName,
-          mobileNumber: formData.mobileNumber,
+          // A new guest is often also the billing customer. The mobile input
+          // is collected in the guest section, so use it when billing mobile
+          // has not been entered separately.
+          mobileNumber: formData.mobileNumber || guestMobileNumber || "",
           emailID: "",
           gstNo: "",
           panNo: "",
@@ -1388,6 +1477,7 @@ useEffect(() => {
         }
       } catch {
         toast.error("Failed to create customer ");
+        isSubmittingRef.current = false;
         return;
       }
     }
@@ -1436,7 +1526,8 @@ useEffect(() => {
         guestDetailedAddress = res.data?.result?.billingAddress;
         guestMobileNumber = res.data?.result?.mobileNumber;
       } catch {
-        toast.error("Failed to create customer c");
+        toast.error("Failed to create customer ");
+        isSubmittingRef.current = false;
         return;
       }
     }
@@ -1452,6 +1543,7 @@ useEffect(() => {
         toast.error(
           "Error: Some rooms were lost during update. Please try again.",
         );
+        isSubmittingRef.current = false;
         return;
       }
     }
@@ -1490,7 +1582,7 @@ useEffect(() => {
       // if (isSubmittingRef.current) return;
       // isSubmittingRef.current = true;
       console.log(payload);
-      let paymenttypeDetails = {}
+      let paymenttypeDetails = {};
       handleSubmit(payload, null, paymenttypeDetails);
     } else {
       setFormData((prev) => ({ ...prev, ...payload }));
@@ -1588,10 +1680,10 @@ useEffect(() => {
     const existingRooms = Array.isArray(formData?.selectedRooms)
       ? formData.selectedRooms
       : [];
-      console.log(existingRooms);
+    console.log(existingRooms);
     const filterRooms = existingRooms.filter((i) => i.roomId !== roomId);
 
-    setSelectedRoomId(null)
+    setSelectedRoomId(null);
 
     setFormData((prev) => ({
       ...prev,
@@ -1908,7 +2000,7 @@ useEffect(() => {
                               </label>
                               <input
                                 name="guestMobileNumber"
-                                value={formData.guestMobileNumber}
+                                value={formData.guestMobileNumber || ""}
                                 onChange={handleChange}
                                 className="w-full border px-3 py-2 rounded text-sm"
                               />
@@ -2430,16 +2522,16 @@ useEffect(() => {
                             <option value="online">Online Booking</option>
                           </select>
                         </div>
-                      {/* Check Out Time */}
-                      <div>
-                        <label className="block uppercase text-blueGray-600 text-xs font-bold mb-2">
-                          Check Out Time
-                        </label>
-                        <TimeSelector
-                          initialTime={ "11:00 AM" || editData?.checkOutTime}
-                          onTimeChange={handleCheckOutTimeChange}
-                        />
-                      </div>
+                        {/* Check Out Time */}
+                        <div>
+                          <label className="block uppercase text-blueGray-600 text-xs font-bold mb-2">
+                            Check Out Time
+                          </label>
+                          <TimeSelector
+                            initialTime={"11:00 AM" || editData?.checkOutTime}
+                            onTimeChange={handleCheckOutTimeChange}
+                          />
+                        </div>
 
                         {/* Hotel Agent */}
                         <div>
@@ -2797,14 +2889,14 @@ useEffect(() => {
 
                     {/* Save Button */}
                     <div className="flex justify-end">
-                     <button
-                      className="bg-pink-500 mt-4 ml-4 w-20 text-white active:bg-pink-600 font-bold uppercase text-xs px-4 py-2 rounded shadow hover:shadow-md outline-none focus:outline-none mr-1 ease-linear transition-all duration-150 transform hover:scale-105 disabled:cursor-not-allowed disabled:bg-pink-300 disabled:hover:scale-100"
-                      type="button"
-                      onClick={submitHandler}
-                      disabled={isFormReadOnly || isSaving}
-                    >
-                      {isSaving ? "Saving..." : editData ? "Update" : "Save"}
-                    </button>
+                      <button
+                        className="bg-pink-500 mt-4 ml-4 w-20 text-white active:bg-pink-600 font-bold uppercase text-xs px-4 py-2 rounded shadow hover:shadow-md outline-none focus:outline-none mr-1 ease-linear transition-all duration-150 transform hover:scale-105 disabled:cursor-not-allowed disabled:bg-pink-300 disabled:hover:scale-100"
+                        type="button"
+                        onClick={submitHandler}
+                        disabled={isFormReadOnly || isSaving}
+                      >
+                        {isSaving ? "Saving..." : editData ? "Update" : "Save"}
+                      </button>
                     </div>
                   </div>
                 </div>

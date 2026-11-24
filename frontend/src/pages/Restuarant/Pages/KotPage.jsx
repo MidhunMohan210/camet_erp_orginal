@@ -1,14 +1,15 @@
+import TouchKeyboardScope from "@/components/common/touchKeyboard/TouchKeyboardScope";
+import TouchInput from "@/components/common/touchKeyboard/TouchInput";
 import { useState, useEffect, useCallback, useRef } from "react";
 import dayjs from "dayjs";
 import useFetch from "@/customHook/useFetch";
-import { useQueryClient } from "@tanstack/react-query";
-import { useSelector } from "react-redux";
+import { useSelector, useDispatch } from "react-redux";
 import { useLocation } from "react-router-dom";
 import PrintModal from "@/pages/Hotel/Components/PrintModal";
 import { IoIosArrowRoundBack } from "react-icons/io";
 import ItemSelector from "../components/ItemSelector";
 import { useQuery } from "@tanstack/react-query";
-
+import { makeItemComplimentary } from "../../Hotel/Helper/hotelHelper";
 import {
   MdDescription,
   MdAccessTime,
@@ -31,16 +32,17 @@ import { Check, CreditCard, X, Banknote, Plus } from "lucide-react";
 import { generateAndPrintKOT } from "@/pages/Restuarant/Helper/kotPrintHelper";
 import { useNavigate } from "react-router-dom";
 // import VoucherPdf from "@/pages/voucher/voucherPdf/indian/VoucherPdf";
-import { toast } from "react-toastify";
+import { toast } from "sonner";
 import { FaRegEdit } from "react-icons/fa";
 import VoucherThreeInchPdf from "@/pages/voucher/voucherPdf/threeInchPdf/VoucherThreeInchPdf";
 import VoucherThreeInchPdfFormat2 from "@/pages/voucher/voucherPdf/threeInchPdf/VoucherThreeInchPdfFormat2";
 import { useReactToPrint } from "react-to-print";
 import CustomerSearchInputBox from "@/pages/Hotel/Components/CustomerSearchInPutBox";
 import KitchenBatchesViewForPrintAndEdit from "../components/KitchenBatchesViewForPrintAndEdit";
-
+import { setKotDate } from "../../../../slices/dateSlice";
 const OrdersDashboard = () => {
   const contentToPrint = useRef(null);
+  const dispatch = useDispatch();
   const [activeFilter, setActiveFilter] = useState("ON PROCESS");
   const [searchQuery, setSearchQuery] = useState("");
   const [userRole, setUserRole] = useState("reception");
@@ -54,13 +56,21 @@ const OrdersDashboard = () => {
   const [selectedDiscountCharge, setSelectedDiscountCharge] = useState(null);
   const [billFormat, setBillFormat] = useState("format1");
   const [note, setNote] = useState("");
-  const [selectedSaleDate,setSelectedSaleDate] = useState(new Date().toISOString().split("T")[0]);
+  const [selectedSaleDate, setSelectedSaleDate] = useState(
+    new Date().toISOString().split("T")[0],
+  );
   const [saveLoader, setSaveLoader] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("cash");
   const [selectedDataForPayment, setSelectedDataForPayment] = useState({});
+  const kotPageDate = useSelector((state) => state.selectedDate.kotPageDate);
+
+  const { start, end, autoFetch } = kotPageDate;
   const [selectedDate, setSelectedDate] = useState(
-    dayjs().format("YYYY-MM-DD"),
+    end || dayjs().format("YYYY-MM-DD"),
+  );
+  const [selectedFromDate, setSelectedFromDate] = useState(
+    start || dayjs().format("YYYY-MM-DD"),
   );
   const [paymentMode, setPaymentMode] = useState("single"); // "single" or "split"
   const [cashAmount, setCashAmount] = useState(0);
@@ -110,20 +120,22 @@ const OrdersDashboard = () => {
   const [splitPaymentRows, setSplitPaymentRows] = useState([
     { source: "", subSource: "", type: "", amount: "", remarks: "", refNo: "" },
   ]);
-
+const permission = useSelector((state) => state.permissionData?.permissions); 
+  const secondaryUserRole =
+    JSON.parse(localStorage.getItem("sUserData"))?.role || "user";
+ const [cancelReload, setCancelReload] = useState(false);
   const addSplitPaymentRow = () =>
     setSplitPaymentRows((prev) => [
       ...prev,
       { source: "", amount: "", remarks: "", refNo: "" },
     ]);
 
-  console.log(splitPaymentRows);
+  
 
   const removeSplitPaymentRow = (index) =>
     setSplitPaymentRows((prev) => prev.filter((_, i) => i !== index));
 
   const updateSplitPaymentRow = (index, field, value) => {
-    console.log(field, value);
     if (value == "credit") {
       setSplitPaymentRows((prev) =>
         prev.map((row, i) =>
@@ -155,7 +167,6 @@ const OrdersDashboard = () => {
   const toggleExpand = (id) =>
     setExpandedOrders((prev) => ({ ...prev, [id]: !prev[id] }));
 
-  // const queryClient = useQueryClient();
   const navigate = useNavigate();
 
   const { _id: cmp_id, name: companyName } = useSelector(
@@ -168,22 +179,43 @@ const OrdersDashboard = () => {
 
   const discountBasedOnGrossAmount =
     org?.configurations?.[0]?.discountBasedOnGrossAmount ?? false;
-const complementaryWithTax =
-  org?.configurations?.[0]?.complementaryWithTax ?? false;
-  const queryClient = useQueryClient(); // ✅ uncomment/move this to here
+  const complementaryWithTax =
+    org?.configurations?.[0]?.complementaryWithTax ?? false;
+  const params = new URLSearchParams({
+    date: selectedDate,
+    fromDate: selectedFromDate,
+  });
 
-  const { data, refetch: refreshHook } = useQuery({
-    queryKey: ["kotDash", cmp_id, selectedDate],
+  useEffect(() => {
+    if (autoFetch && cmp_id) {
+      queryKey: (["kotDash", cmp_id, selectedDate, selectedFromDate],
+        dispatch(
+          setKotDate({
+            autoFetch: true,
+            start: start,
+            end: end,
+          }),
+        ));
+    }
+  }, [autoFetch, cmp_id]);
+
+  const { data } = useQuery({
+    queryKey: ["kotDash", cmp_id, selectedDate, selectedFromDate],
+
     queryFn: async () => {
       const res = await api.get(
-        `/api/sUsers/getKotDataDash/${cmp_id}?date=${selectedDate}`,
+        `/api/sUsers/getKotDataDash/${cmp_id}?${params.toString()}`,
         { withCredentials: true },
       );
       return res.data;
     },
-    refetchInterval: 10000, // ✅ auto-refresh every 10 seconds
-    refetchIntervalInBackground: true, // ✅ refreshes even when tab is not focused
-    staleTime: 5000,
+    // Always fetch the latest KOTs when this screen is opened. Background
+    // revalidation remains disabled so an operator's active work is not
+    // interrupted while they stay on the page.
+    staleTime: Infinity,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     enabled: !!cmp_id,
   });
 
@@ -226,7 +258,6 @@ const complementaryWithTax =
         }
         setAllAdditionalChargesFromRedux(additionalChargesResponse);
       }
-      console.log(selectedAdditionalChargeData);
       // ✅ Now SAFE to filter
       const discountCharges = additionalChargesResponse.filter((charge) =>
         charge.name.toLowerCase().includes("discount"),
@@ -272,8 +303,15 @@ const complementaryWithTax =
   useEffect(() => {
     if (data) {
       setOrders(data?.data);
+      dispatch(
+        setKotDate({
+          start: selectedFromDate,
+          end: selectedDate,
+          autoFetch: true,
+        }),
+      );
     }
-  }, [data, selectedDate]);
+  }, [data, selectedDate, selectedFromDate]);
 
   const { data: paymentTypeData } = useFetch(
     `/api/sUsers/getPaymentType/${cmp_id}`,
@@ -283,7 +321,6 @@ const complementaryWithTax =
       const { bankDetails, cashDetails } = paymentTypeData?.data;
 
       setCashOrBank(paymentTypeData?.data);
-      console.log(paymentTypeData?.data);
       if (bankDetails && bankDetails.length > 0) {
         setSelectedBank(bankDetails[0]._id);
       }
@@ -432,7 +469,6 @@ const complementaryWithTax =
 
     // Filter by search query
     if (searchQuery) {
-      console.log(filtered);
       filtered = filtered.filter(
         (order) =>
           order?.customer?.tableNumber
@@ -457,7 +493,6 @@ const complementaryWithTax =
   };
 
   const handleStatusChange = async (orderId, newStatus, batchNo) => {
-    console.log(newStatus);
     setSaveLoader(true);
 
     try {
@@ -478,15 +513,9 @@ const complementaryWithTax =
                 : batch,
             );
 
-            console.log(updatedBatches);
-
             const allCompleted =
               updatedBatches?.length > 0 &&
               updatedBatches.every((b) => b.status === "completed");
-
-            console.log(allCompleted);
-            console.log(updatedBatches);
-            console.log(order.status);
 
             return {
               ...order,
@@ -496,9 +525,6 @@ const complementaryWithTax =
             };
           }),
         );
-        queryClient.invalidateQueries({
-          queryKey: ["kotDash", cmp_id, selectedDate],
-        });
       }
     } catch (error) {
       console.error(
@@ -510,14 +536,11 @@ const complementaryWithTax =
     }
   };
 
-  console.log(orders[20]?.voucherNumber);
-  console.log(orders[20]?.status);
   // function used to perform print  with kot
   const handleKotPrint = (data, batchNo) => {
     let newItems = data?.items || [];
-    console.log(data);
+
     if (batchNo !== null && batchNo !== undefined && batchNo !== "") {
-      console.log(batchNo);
       const batchData = data.kitchenBatches.find(
         (item) => item.batchNo === batchNo,
       );
@@ -538,7 +561,7 @@ const complementaryWithTax =
           });
       }
     }
-    console.log(data);
+
     const orderData = {
       kotNo: data?.voucherNumber,
       tableNo: data?.tableNumber,
@@ -553,18 +576,17 @@ const complementaryWithTax =
     setSelectedMode(null);
     setShowBatchWiseKotPrint(false);
     setDataForBatchWisePrint(null);
-    generateAndPrintKOT(orderData, true, false, companyName);
+    generateAndPrintKOT(orderData, true, false, companyName ,org?.configurations?.[0]?.kotPrinter);
   };
 
   const handleKotCancel = async () => {
+     setCancelReload(true);
     try {
       if (!selectedOrderForCancel) return;
-
       const response = await api.put(
         `/api/sUsers/cancel/${selectedOrderForCancel._id}`,
         { reason: cancelReason },
-          { withCredentials: true }
-
+        { withCredentials: true },
       );
 
       if (response.data.success) {
@@ -572,9 +594,6 @@ const complementaryWithTax =
         setOrders((prevOrders) =>
           prevOrders.filter((kot) => kot._id !== selectedOrderForCancel._id),
         );
-        queryClient.invalidateQueries({
-          queryKey: ["kotDash", cmp_id, selectedDate],
-        });
         setShowCancelModal(false);
         setCancelReason(""); // clear reason field
         setSelectedOrderForCancel(null);
@@ -583,6 +602,8 @@ const complementaryWithTax =
       }
     } catch (error) {
       console.error("Error cancelling KOT:", error);
+    } finally {
+      setCancelReload(false);
     }
   };
 
@@ -628,7 +649,6 @@ const complementaryWithTax =
 
   useEffect(() => {
     if (salePrintData) {
-      console.log("salePrintData", salePrintData);
       billFormat === "format1"
         ? navigate(`/sUsers/sharesalesThreeInch/${salePrintData._id}`)
         : navigate(`/sUsers/sharesalesThreeInch2/${true}`, {
@@ -639,10 +659,7 @@ const complementaryWithTax =
 
   const filteredOrders = getFilteredOrders();
 
-  console.log("filteredOrders", filteredOrders);
-
   const handleSavePayment = async (id) => {
-    console.log(paymentMode);
     setSaveLoader(true);
 
     try {
@@ -820,7 +837,6 @@ const complementaryWithTax =
       if (previewForSales && previewForSales.additionalCharges.length > 0) {
         // ✅ Use EXACTLY what's in preview - don't rebuild
         additionalChargesData = previewForSales.additionalCharges;
-        console.log(additionalChargesData);
         additionalChargesData = [
           {
             _id: findOne._id,
@@ -833,24 +849,14 @@ const complementaryWithTax =
             finalValue: previewForSales.additionalCharges[0].finalValue,
           },
         ];
-        console.log(additionalChargesData);
       }
 
-      console.log("=== PAYMENT SUBMISSION ===");
       const hasAutoComplimentary = selectedKot.some((kot) => {
         const order = filteredOrders.find((o) => o._id === kot.id);
         return order?.foodPlanDetails?.isComplimentary === true;
       });
 
       const isManuallyComplimentary = isComplimentary && !hasAutoComplimentary;
-
-      console.log("=== PAYMENT SUBMISSION ===");
-      console.log("Is Complimentary:", isComplimentary);
-      console.log(
-        "Has Auto Complimentary (from Food Plan):",
-        hasAutoComplimentary,
-      );
-      console.log("Is Manually Complimentary:", isManuallyComplimentary);
 
       // Show appropriate toast message
       if (isComplimentary) {
@@ -878,11 +884,8 @@ const complementaryWithTax =
         // discountAmount: previewDiscount,
         note,
         discountBasedOnGrossAmount: discountBasedOnGrossAmount,
-        complementaryWithTax: complementaryWithTax, 
+        complementaryWithTax: complementaryWithTax,
       };
-
-      console.log(payment);
-   
 
       const response = await api.put(
         `/api/sUsers/updateKotPayment/${cmp_id}`,
@@ -907,8 +910,6 @@ const complementaryWithTax =
             : response?.data?.message,
         );
 
-        console.log(response.data.data);
-
         setPrintData(response?.data?.data);
         setShowPaymentModal(false);
         setSelectedDiscountCharge(null);
@@ -928,9 +929,6 @@ const complementaryWithTax =
       setSaveLoader(false);
       setCashAmount(0);
       setOnlineAmount(0);
-      queryClient.invalidateQueries({
-        queryKey: ["kotDash", cmp_id, selectedDate],
-      });
       setPaymentMode("single");
       setSelectedCreditor("");
       setSelectedKot([]);
@@ -944,7 +942,6 @@ const complementaryWithTax =
         `/api/sUsers/getSalePrintData/${cmp_id}/${kotId}`,
         { withCredentials: true },
       );
-      console.log(saleData?.data?.data);
       setSalePrintData(saleData?.data?.data);
     } catch (error) {
       console.log(error);
@@ -955,10 +952,9 @@ const complementaryWithTax =
   const handleSelectMultipleKots = (order) => {
     if (userRole == "kitchen") return;
     if (order && !order?.paymentCompleted) {
-      console.log(order?.roomId?._id);
       const findOne = selectedKot.find((item) => item.id === order._id);
       const firstSelected = selectedKot[0];
-      console.log(firstSelected); // take the first selection
+      // take the first selection
 
       if (firstSelected) {
         // ✅ only allow roomService with same roomId
@@ -991,14 +987,54 @@ const complementaryWithTax =
     }
   };
 
-  const handleSalesPreview = (postToRoom) => {
+  const handleSalesPreview = async (postToRoom) => {
+    if (postToRoom) {
+      const selectedRoomKot = selectedKot[0];
+      const roomId = selectedRoomKot?.roomId;
+      const checkInNumber = selectedRoomKot?.checkInNumber;
+
+      if (!roomId || !checkInNumber) {
+        toast.error("This KOT is not linked to an active room check-in.");
+        return;
+      }
+
+      try {
+        const response = await api.get(
+          `/api/sUsers/getallnoncheckoutCheckins/${cmp_id}`,
+          { withCredentials: true },
+        );
+        const activeCheckIn = (response.data?.data || []).find(
+          (checkIn) =>
+            String(checkIn?.voucherNumber) === String(checkInNumber) &&
+            checkIn?.selectedRooms?.some(
+              (room) =>
+                String(room?.roomId?._id || room?.roomId) ===
+                  String(roomId) && !room?.isCheckedOut,
+            ),
+        );
+
+        if (!activeCheckIn) {
+          toast.error(
+            "This room's check-in has already been checked out. Post to Room is unavailable.",
+          );
+          return;
+        }
+      } catch (error) {
+        toast.error(
+          error.response?.data?.message ||
+            "This room has already been checked out. Post to Room is unavailable.",
+        );
+        return;
+      }
+    }
+
     setIsPostToRooms(postToRoom);
     let kotVoucherNumberArray = [];
 
     let roomDetails = null;
     let itemList = selectedKot.flatMap((item) => {
       let findOne = filteredOrders.find((order) => order._id == item.id);
-
+      console.log(findOne);
       if (findOne) {
         if (!roomDetails && findOne.roomId) {
           roomDetails = {
@@ -1019,8 +1055,14 @@ const complementaryWithTax =
       }
       return findOne?.items || []; // return empty array if not found
     });
-    console.log(itemList);
     let subtotal;
+
+    if (isComplimentary) {
+      let updatedItemList = itemList.map((item) => {
+        return makeItemComplimentary(item);
+      });
+      itemList = updatedItemList;
+    }
 
     if (discountBasedOnGrossAmount) {
       const gross = itemList.reduce(
@@ -1037,22 +1079,20 @@ const complementaryWithTax =
       const totalDiscount = Number(discountAmount || 0);
 
       const net = itemList.reduce((acc, item) => {
-        console.log(item);
         const lineTotal = Number(item.total || 0);
-        console.log(lineTotal);
+
         const share = gross > 0 ? (lineTotal / gross) * totalDiscount : 0; // proportional
-        console.log(share);
+
         return acc + (lineTotal - share);
       }, 0);
 
       subtotal = Math.round(net).toFixed(2);
     }
 
-    console.log(subtotal, discountAmount);
     let finalAmount = discountBasedOnGrossAmount
       ? Math.round(Number(subtotal) - Number(discountAmount || 0)).toFixed(2)
       : Math.round(subtotal).toFixed(2);
-    console.log(finalAmount);
+
     let additionalChargesArray = [];
 
     if (discountAmount > 0 && selectedDiscountCharge) {
@@ -1076,7 +1116,6 @@ const complementaryWithTax =
         finalValue: Number(discountAmount),
       });
     }
-    console.log(additionalChargesArray);
 
     let newObject = {
       Date: new Date(),
@@ -1108,7 +1147,7 @@ const complementaryWithTax =
         mobile: selectedKot[0]?.customer?.phone,
       },
     };
-    console.log("Preview Object Created:", newObject);
+
     setPreviewForSales(newObject);
   };
 
@@ -1123,11 +1162,7 @@ const complementaryWithTax =
     }
   }, [paymentMethod, selectedCash, selectedBank, isForComp]);
 
-  console.log(paymentMethod);
   const handleSaveSales = (status) => {
-    queryClient.invalidateQueries({
-      queryKey: ["kotDash", cmp_id, selectedDate],
-    }); // ✅
     setConformationModal(false);
     setSelectedDataForPayment(previewForSales);
     if (isPostToRoom && status) {
@@ -1140,7 +1175,7 @@ const complementaryWithTax =
         ...cashOrBank.bankDetails,
         ...cashOrBank.cashDetails,
       ];
-      console.log(newMergedCashOrBank);
+
       let complementaryParty = newMergedCashOrBank.find(
         (item) => item.isTaggedWithComplementary,
       );
@@ -1151,7 +1186,6 @@ const complementaryWithTax =
 
       setPaymentMethod(complementaryParty?.partyType);
       if (complementaryParty.partyType == "cash") {
-        console.log(complementaryParty?._id);
         setSelectedCash(complementaryParty?._id);
       }
       if (complementaryParty.partyType == "bank") {
@@ -1170,14 +1204,11 @@ const complementaryWithTax =
     setShowPaymentModal(true);
   };
 
-  console.log("selectedKot", showPaymentModal);
-
   const handleEditKot = (kotData, batchNo, order) => {
     if (kotData?.paymentCompleted) {
       toast.error("Kot Payment is completed so you can't edit");
       return;
     }
-    console.log("KOT to be edited:", order);
     // else if (kotData?.status === "completed") {
     //   toast.error("Kot is already completed so you can't edit");
     //   return;
@@ -1191,26 +1222,14 @@ const complementaryWithTax =
     content: () => contentToPrint.current,
   });
 
-  console.log(additionalCharges);
   useEffect(() => {
     if (selectedKot.length > 0 && filteredOrders.length > 0) {
-      console.log("=== PAYMENT MODAL OPENED ===");
-
       // Check if any KOT has complimentary food plan
       const hasComplimentaryFoodPlan = selectedKot.some((kot) => {
         const order = filteredOrders.find((o) => o._id === kot.id);
 
-        console.log("Checking KOT:", kot.voucherNumber);
-        console.log("Food Plan Details:", order?.foodPlanDetails);
-        console.log(
-          "Is Complimentary:",
-          order?.foodPlanDetails?.isComplimentary,
-        );
-
         return order?.foodPlanDetails?.isComplimentary == true;
       });
-
-      console.log("Has Complimentary Food Plan:", hasComplimentaryFoodPlan);
 
       // ✅ Auto-tick checkbox if complimentary
       setIsComplimentary(hasComplimentaryFoodPlan);
@@ -1219,7 +1238,6 @@ const complementaryWithTax =
 
   const handlePrintShow = () => {
     let updatedData = { ...printData.salesRecord, ...printData?.kotData };
-    console.log(updatedData);
     navigate(`/sUsers/sharesalesThreeInch2/${true}`, {
       state: updatedData,
     });
@@ -1275,7 +1293,6 @@ const complementaryWithTax =
   };
 
   const handleSpecificItemSale = (data) => {
-    console.log("data", data);
     setOrders((prevOrders) =>
       prevOrders.map((order) => {
         const matchedItem = data.find((item) => item._id === order._id);
@@ -1289,7 +1306,7 @@ const complementaryWithTax =
     );
     setSpecificSelectedKotItemWise(data);
   };
-  console.log(cashOrBank);
+
   const combinedSources = [
     ...(cashOrBank?.cashDetails?.map((c) => ({
       id: c._id,
@@ -1421,18 +1438,39 @@ const complementaryWithTax =
                   </select>
                 </div>
               </div>
-              <div className="flex items-center gap-4">
-                <div className="text-gray-600 text-sm">
-                  {dayjs(selectedDate).format("dddd, D MMMM YYYY")}
+              <>
+                <div className="flex items-center gap-4 mr-2">
+                  <div className="text-gray-600 text-sm">
+                    <span>From:</span>
+                  </div>
+                  <input
+                    type="date"
+                    value={selectedFromDate}
+                    onChange={(e) =>
+                      e.target.value <= selectedDate &&
+                      setSelectedFromDate(e.target.value)
+                    }
+                    className="px-3 py-1 border rounded text-sm"
+                    max={dayjs().format("YYYY-MM-DD")}
+                  />
+                  {/* </div> */}
+                  {/* <div className="flex items-center gap-4"> */}
+                  <div className="text-gray-600 text-sm">
+                    <span>To:</span>
+                    {/* {dayjs(selectedDate).format("dddd, D MMMM YYYY")} */}
+                  </div>
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    onChange={(e) =>
+                      e.target.value >= selectedFromDate &&
+                      setSelectedDate(e.target.value)
+                    }
+                    className="px-3 py-1 border rounded text-sm"
+                    max={dayjs().format("YYYY-MM-DD")}
+                  />
                 </div>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  onChange={(e) => setSelectedDate(e.target.value)}
-                  className="px-3 py-1 border rounded text-sm"
-                  max={dayjs().format("YYYY-MM-DD")}
-                />
-              </div>
+              </>
             </div>
           </div>
 
@@ -1470,7 +1508,7 @@ const complementaryWithTax =
             )}
             <div className="flex items-center gap-2">
               <MenuIcon />
-              <input
+              <TouchInput
                 type="text"
                 className="px-3 py-1.5 border border-gray-300 rounded-md w-64 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
                 placeholder="Search name, order ID, or items..."
@@ -1518,7 +1556,6 @@ const complementaryWithTax =
                     const isOrderSelected = (o) =>
                       selectedKot.find((item) => item.id === o._id);
                     const displayItems = order._batchItems ?? order.items;
-                    console.log(order);
                     return (
                       <div
                         key={order._batchCardId}
@@ -1861,12 +1898,10 @@ const complementaryWithTax =
                           const isSelected = selectedKot.find(
                             (item) => item.id === order._id,
                           );
-                          console.log(order.total);
+
                           const isExpanded = expandedOrders[order._id];
                           const discountedTotal =
                             Number(order.total) - Number(order.discount || 0);
-
-                          console.log(order);
 
                           return (
                             <div
@@ -2234,7 +2269,7 @@ const complementaryWithTax =
             )}
 
             {/* ── Floating Pay Button ── */}
-            {selectedKot.length > 0 && (
+            {(selectedKot.length > 0  && (permission.restaurantPayment || secondaryUserRole === "admin")) &&  (
               <div className="fixed bottom-4 right-4 z-50 w-[320px] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-2xl border border-gray-200 p-4 animate-slideUp">
                 <div className="bg-white rounded-2xl shadow-2xl border border-gray-200 p-4 min-w-[280px]">
                   <div className="flex items-center justify-between mb-3">
@@ -2255,7 +2290,6 @@ const complementaryWithTax =
                     <button
                       onClick={() => {
                         setSelectedKot([]);
-                        refreshHook();
                       }}
                       className="text-gray-400 hover:text-gray-600 p-1 hover:bg-gray-100 rounded-full transition-all"
                     >
@@ -2342,7 +2376,7 @@ const complementaryWithTax =
                               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 text-xs">
                                 {discountType === "percentage" ? "%" : "₹"}
                               </span>
-                              <input
+                              <TouchInput
                                 type="number"
                                 value={discountValue || ""}
                                 onChange={(e) => {
@@ -2393,8 +2427,6 @@ const complementaryWithTax =
                                       return acc + (total - igst);
                                     }, 0);
                                   }
-
-                                  console.log(subtotal);
 
                                   // Calculate discount amount
                                   const calculatedAmount =
@@ -2478,7 +2510,7 @@ const complementaryWithTax =
                         <label className="block text-xs font-semibold text-green-800 mb-1">
                           Remarks
                         </label>
-                        <input
+                        <TouchInput
                           type="text"
                           placeholder="Enter note (optional)"
                           className="w-full px-3 py-2 text-sm border border-green-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-400"
@@ -2522,10 +2554,7 @@ const complementaryWithTax =
                           <input
                             type="checkbox"
                             checked={isSpecific}
-                            onChange={(e) => {
-                              refreshHook();
-                              setIsSpecific(e.target.checked);
-                            }}
+                            onChange={(e) => setIsSpecific(e.target.checked)}
                             className="mt-1 w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500 flex-shrink-0"
                           />
                           <span className="text-sm font-semibold text-green-700">
@@ -2562,7 +2591,6 @@ const complementaryWithTax =
                     <button
                       onClick={() => {
                         setSelectedKot([]);
-                        refreshHook();
                       }}
                       className="flex-1 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-all duration-200"
                     >
@@ -2857,7 +2885,6 @@ const complementaryWithTax =
                       // ✅ Restaurant: no customer field required — only source + amount
                       const lastRow =
                         splitPaymentRows[splitPaymentRows.length - 1];
-                      console.log(lastRow);
                       const lastRowValid =
                         lastRow &&
                         lastRow.source?.trim() !== "" &&
@@ -2909,8 +2936,6 @@ const complementaryWithTax =
                                 (s) => s.id === row.source,
                               );
                               const sourceType = sourceObj?.type || "";
-
-                              console.log(sourceType);
 
                               const rowLocked =
                                 isFullyPaid &&
@@ -2980,7 +3005,7 @@ const complementaryWithTax =
                                         >
                                           ₹
                                         </span>
-                                        <input
+                                        <TouchInput
                                           type="number"
                                           disabled={rowLocked}
                                           value={row.amount}
@@ -3050,7 +3075,7 @@ const complementaryWithTax =
                                       <label className="block text-[11px] text-gray-500 mb-1">
                                         Remarks
                                       </label>
-                                      <input
+                                      <TouchInput
                                         type="text"
                                         disabled={rowLocked}
                                         value={row.remarks || ""}
@@ -3076,6 +3101,7 @@ const complementaryWithTax =
                                         Creditor
                                       </label>
                                       <CustomerSearchInputBox
+                        inputComponent={TouchInput}
                                         onSelect={(party) => {
                                           updateSplitPaymentRow(
                                             index,
@@ -3101,7 +3127,7 @@ const complementaryWithTax =
                                               ? "Ref. No"
                                               : "Remarks"}
                                           </label>
-                                          <input
+                                          <TouchInput
                                             type="text"
                                             disabled={rowLocked}
                                             value={row[field] || ""}
@@ -3251,6 +3277,7 @@ const complementaryWithTax =
                         Select Creditor
                       </label>
                       <CustomerSearchInputBox
+                        inputComponent={TouchInput}
                         onSelect={(party) => {
                           setSelectedCreditor(party);
                         }}
@@ -3406,7 +3433,7 @@ const complementaryWithTax =
                       Reason for Cancellation{" "}
                       <span className="text-red-500">*</span>
                     </label>
-                    <textarea
+                    <TouchInput as="textarea"
                       value={cancelReason}
                       onChange={(e) => {
                         setCancelReason(e.target.value);
@@ -3442,10 +3469,42 @@ const complementaryWithTax =
                     </button>
                     <button
                       onClick={handleKotCancel}
-                      className="flex-1 px-4 py-2 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-all duration-200 flex items-center justify-center gap-2"
+                      disabled={cancelReload}
+                      className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 flex items-center justify-center gap-2 ${
+                        cancelReload
+                          ? "bg-red-400 cursor-not-allowed opacity-80"
+                          : "bg-red-500 text-white hover:bg-red-600"
+                      }`}
                     >
-                      <MdCancel className="w-4 h-4" />
-                      Confirm Cancel
+                      {cancelReload ? (
+                        <>
+                          <svg
+                            className="w-4 h-4 animate-spin"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                          >
+                            <circle
+                              className="opacity-25"
+                              cx="12"
+                              cy="12"
+                              r="10"
+                              stroke="currentColor"
+                              strokeWidth="4"
+                            />
+                            <path
+                              className="opacity-75"
+                              fill="currentColor"
+                              d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"
+                            />
+                          </svg>
+                          Cancelling...
+                        </>
+                      ) : (
+                        <>
+                          <MdCancel className="w-4 h-4" />
+                          Confirm Cancel
+                        </>
+                      )}
                     </button>
                   </div>
                 </motion.div>
@@ -3481,4 +3540,6 @@ const complementaryWithTax =
   );
 };
 
-export default OrdersDashboard;
+export default function OrdersDashboardWithKeyboard() {
+  return <TouchKeyboardScope><OrdersDashboard /></TouchKeyboardScope>;
+}

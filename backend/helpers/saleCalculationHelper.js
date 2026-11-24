@@ -24,6 +24,39 @@ export const calculateStayDays = (doc, room) => {
   if (room.isSwapped) {
     start = arrival;
     end = swap;
+    const currentSelectedRoomId = String(room?._id || "");
+    const currentRoomId = String(room?.roomId?._id || room?.roomId || "");
+    let swappedRoomObject = doc?.roomSwapHistory?.find(
+      (r) =>
+        r?.fromSelectedRoomId && currentSelectedRoomId
+          ? String(r.fromSelectedRoomId) === currentSelectedRoomId
+          : String(r?.fromRoomId?._id || r?.fromRoomId || "") === currentRoomId,
+    );
+    console.log(swappedRoomObject);
+    if (swappedRoomObject?.toRoomId) {
+      let swappedRoomData = doc?.selectedRooms.find(
+        (r) =>
+          swappedRoomObject?.toSelectedRoomId
+            ? String(r?._id || "") === String(swappedRoomObject.toSelectedRoomId)
+            : String(r?.roomId?._id || r?.roomId || "") ===
+              String(swappedRoomObject?.toRoomId?._id || swappedRoomObject?.toRoomId || ""),
+      );
+      let isRoomSwappedData = doc?.roomSwapHistory?.find(
+        (r) =>
+          r?.toSelectedRoomId && currentSelectedRoomId
+            ? String(r.toSelectedRoomId) === currentSelectedRoomId
+            : String(r?.toRoomId?._id || r?.toRoomId || "") === currentRoomId,
+      );
+
+      if (swappedRoomData?.isSwapped === false && isRoomSwappedData) {
+        start = normalizeUTCDate(swappedRoomData.swappingDateFrom);
+        start.setDate(start.getDate() - 1);
+      } else {
+        console.log(room);
+        start = normalizeUTCDate(doc.arrivalDate);
+        end = normalizeUTCDate(room.swappingDateFrom);
+      }
+    }
   } else {
     start = swap;
     end = checkout;
@@ -175,7 +208,18 @@ export const getFullRoomDetails = (roomData, doc) => {
 
   for (const room of roomData || []) {
     const roomStayDays = calculateStayDays(doc, room);
-    if (roomStayDays <= 0) continue;
+   if (roomStayDays <= 0) {
+  if (room?.isSwapped || room?.swappingDateFrom) {
+    updatedRooms.push({
+      ...room,
+      stayDays: 0,
+      amountWithOutTax: 0,
+      amountAfterTax: 0,
+      taxAmount: 0,
+    });
+  }
+  continue;
+}
 
     const effectiveRoomPrice = getEffectiveRoomPrice(room, roomStayDays);
 
@@ -238,26 +282,28 @@ export const getFullRoomDetails = (roomData, doc) => {
   };
 };
 
-
-export const handleRecalculateCheckOut = async (selectedCheckOut, cmp_id, session) => {
+export const handleRecalculateCheckOut = async (
+  selectedCheckOut,
+  cmp_id,
+  session,
+) => {
   const updatedItems = [];
 
   for (const checkout of selectedCheckOut) {
     const roomDetails = getFullRoomDetails(checkout.selectedRooms, checkout);
 
-    console.log("roomsedf",roomDetails);
+    console.log("roomsedf", roomDetails);
     const roomTotal = round2(
-      roomDetails.taxableAmount + roomDetails.roomTaxAmount 
+      roomDetails.taxableAmount + roomDetails.roomTaxAmount,
     );
 
     const grandTotal = round2(
       roomTotal +
-      roomDetails.specificFoodPlanTotal +
-      roomDetails.additionalPaxWithTax
+        roomDetails.specificFoodPlanTotal +
+        roomDetails.additionalPaxWithTax,
     );
 
-
-    console.log("roomTotal",roomTotal,grandTotal);
+    console.log("roomTotal", roomTotal, grandTotal);
 
     updatedItems.push({
       ...checkout,

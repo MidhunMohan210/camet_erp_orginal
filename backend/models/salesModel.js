@@ -5,6 +5,11 @@ const { Schema } = mongoose;
 // Payment Splitting Schema
 const paymentSplitSchema = new Schema(
   {
+    paymentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: () => new mongoose.Types.ObjectId(),
+      immutable: true,
+    },
     type: {
       type: String,
       required: true,
@@ -73,6 +78,7 @@ const salesSchema = new Schema(
     },
     selectedDate: { type: String },
     voucherType: { type: String },
+    returnCreditNoteIds: [{ type: Schema.Types.ObjectId, ref: "CreditNote" }],
     convertedFrom: { type: Array, default: [] },
     serialNumber: { type: Number },
     userLevelSerialNumber: { type: Number },
@@ -342,7 +348,7 @@ const salesSchema = new Schema(
     },
 
     isCancelled: { type: Boolean, default: false },
-      cancelledAt: {
+    cancelledAt: {
       type: Date,
     },
     cancelledBy: {
@@ -392,6 +398,9 @@ salesSchema.index(
 
 // 3. Most common query pattern (company + date sorting)
 salesSchema.index({ cmp_id: 1, date: -1 });
+
+// Restaurant KOT-to-sale lookup by the originating voucher number.
+salesSchema.index({ cmp_id: 1, "convertedFrom.voucherNumber": 1 });
 
 // 4. Party reference queries
 salesSchema.index({ cmp_id: 1, "party._id": 1 });

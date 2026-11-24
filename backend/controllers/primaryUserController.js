@@ -33,6 +33,57 @@ import paymentModel from "../models/paymentModel.js";
 import ReceiptModel from "../models/receiptModel.js";
 import partyModel from "../models/partyModel.js";
 import subGroup from "../models/subGroup.js";
+import {
+  calculateSubscriptionExpiry,
+  getSubscriptionStatus,
+  normalizeSubscription,
+} from "../utils/subscription.js";
+
+const allowedPermissionKeys = new Set([
+  "hotelManagement",
+  "restaurantManagement",
+  "voucher",
+  "reports",
+  "hotelDashboard",
+  "bookingList",
+  "checkinList",
+  "checkoutList",
+  "editTariffRate",
+  "swapRoom",
+  "roomShift",
+  "guestLedger",
+  "restaurantDashboard",
+  "kotPage",
+  "restaurantPayment",
+  "restaurantDailySales",
+  "categoryWiseSales",
+  "itemWiseSales",
+  "kotRegister",
+  "restaurantReceiptReport",
+  "saleRegister",
+  "hotelReports",
+  "restaurantReports",
+  "voucherReports",
+  "dailySalesReport",
+  "foDailyStatement",
+  "flashReport",
+  "paxReport",
+  "foodPlanReport",
+  "occupancyReport",
+  "roomSummaryReport",
+  "receiptReport",
+  "travelAgentReport",
+  "foBillSummary",
+  "cancellationReport",
+]);
+
+const sanitizePermissions = (permissions = {}) =>
+  Object.keys(permissions).reduce((acc, key) => {
+    if (allowedPermissionKeys.has(key)) {
+      acc[key] = permissions[key] === true;
+    }
+    return acc;
+  }, {});
 
 // @desc Register Primary user
 // route POST/api/pUsers/register
@@ -67,12 +118,15 @@ export const registerPrimaryUser = async (req, res) => {
     }
 
     // Create Primary User
+    const normalizedSubscription = normalizeSubscription(subscription);
+    const subscriptionStart = new Date();
     const primaryUser = new PrimaryUser({
       userName,
       mobile,
       email,
       password,
-      subscription,
+      subscription: normalizedSubscription,
+      subscriptionExpiry: calculateSubscriptionExpiry(subscriptionStart, normalizedSubscription),
     });
 
     const primaryUserResult = await primaryUser.save({ session });
@@ -144,12 +198,25 @@ export const login = async (req, res) => {
       primaryUser = await PrimaryUser.findOne({ mobile: email });
     }
 
+    if (!primaryUser) {
+      return res.status(404).json({ message: "Invalid email or password" });
+    }
+
     if (primaryUser.isApproved === false) {
       return res.status(401).json({ message: "User approval is pending" });
     }
 
     if (primaryUser.isBlocked) {
       return res.status(401).json({ message: "User is blocked" });
+    }
+
+    const subscriptionStatus = getSubscriptionStatus(primaryUser);
+    if (subscriptionStatus.isExpired) {
+      return res.status(403).json({
+        code: "SUBSCRIPTION_EXPIRED",
+        message: "Your subscription has expired. Please renew to continue.",
+        subscription: subscriptionStatus,
+      });
     }
 
     const isPasswordMatch = await bcrypt.compare(
@@ -175,7 +242,7 @@ export const login = async (req, res) => {
     return res.status(200).json({
       message: "Login successful",
       token,
-      data: { email, userName, _id, haveOut, sms },
+      data: { email, userName, _id, haveOut, sms, subscription: subscriptionStatus },
     });
   } catch (error) {
     console.log(error);
@@ -190,8 +257,13 @@ export const addSecUsers = async (req, res) => {
   try {
     const { name, mobile, email, password } = req.body;
     const pUserId = req.owner;
+    const normalizedEmail = String(email || "").trim().toLowerCase();
 
-    const userExists = await SecondaryUser.findOne({ email });
+    if (!normalizedEmail) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const userExists = await SecondaryUser.findOne({ email: normalizedEmail }).collation({ locale: "en", strength: 2 });
 
     if (userExists) {
       return res
@@ -202,7 +274,7 @@ export const addSecUsers = async (req, res) => {
     const user = new SecondaryUser({
       name,
       mobile,
-      email,
+      email: normalizedEmail,
       password,
       primaryUser: pUserId,
     });
@@ -221,6 +293,9 @@ export const addSecUsers = async (req, res) => {
       });
     }
   } catch (error) {
+    if (error?.code === 11000 && error?.keyPattern?.email) {
+      return res.status(409).json({ success: false, message: "This email is already registered." });
+    }
     console.error(error);
     return res
       .status(500)
@@ -1077,9 +1152,10 @@ export const getUserPermissions = async (req, res) => {
   try {
     const userId = req.params.id;
 
-    const user = await SecondaryUser.findById(userId).select(
-      "name email mobile role permissions organization primaryUser"
-    );
+    const user = await SecondaryUser.findOne({
+      _id: userId,
+      primaryUser: req.owner,
+    }).select("name email mobile role permissions organization primaryUser");
 
     if (!user) {
       return res.status(404).json({
@@ -1104,33 +1180,31 @@ export const getUserPermissions = async (req, res) => {
 
 // @desc update user permissions
 // route PATCH /api/sUsers/updateUserPermissions/:id
-export const updateUserPermissions = async (req, res) => {
-  try {
-    const userId = req.params.id;
-    const { permissions } = req.body;
+export const updateUserPermissions = async(req,res)=>{
 
-    const user = await SecondaryUser.findById(userId);
+    const admin = await SecondaryUser.findById(req.sUserId );
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
+    if(admin?.role!=="admin"){
+        return res.status(403).json({
+            message:"Only admin can update permissions"
+        });
     }
 
-    user.permissions = permissions || {};
+    const user = await SecondaryUser.findById(req.params.id);
+
+    if(!user){
+        return res.status(404).json({
+            message:"User not found"
+        });
+    }
+
+    user.permissions = req.body.permissions;
+
     await user.save();
 
-    return res.status(200).json({
-      success: true,
-      message: "Permissions updated successfully",
-      user,
+    res.json({
+        success:true,
+        message:"Permissions updated"
     });
-  } catch (error) {
-    console.error("updateUserPermissions error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error, try again!",
-    });
-  }
-};
+
+}

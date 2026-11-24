@@ -11,7 +11,7 @@ function BookingPage() {
   const location = useLocation();
   const isSubmittingRef = useRef(false);
   const roomId = location?.state?.roomId;
-  const rooms = location?.state?.rooms
+  const rooms = location?.state?.rooms;
   const organization = useSelector(
     (state) => state?.secSelectedOrganization?.secSelectedOrg,
   );
@@ -19,12 +19,18 @@ function BookingPage() {
   const [submitLoader, setSubmitLoader] = useState(false);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const bookingRequestIdRef = useRef(null);
 
   const handleSubmit = async (data, paymentData, paymenttypeDetails) => {
     try {
+      if (!bookingRequestIdRef.current) {
+        bookingRequestIdRef.current =
+          crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      }
       let response = await api.post(
         `/api/sUsers/saveData/${organization._id}`,
         {
+          bookingRequestId: bookingRequestIdRef.current,
           data: data,
           modal: "bookingPage",
           paymentData: paymentData,
@@ -39,13 +45,14 @@ function BookingPage() {
         });
         navigate("/sUsers/bookingList");
       }
-      isSubmittingRef.current = false;
     } catch (error) {
       console.log(error);
       toast.error(error?.response?.data?.message);
       isSubmittingRef.current = false;
     } finally {
       setSubmitLoader(false);
+      bookingRequestIdRef.current = null;
+      isSubmittingRef.current = false;
     }
   };
   return (

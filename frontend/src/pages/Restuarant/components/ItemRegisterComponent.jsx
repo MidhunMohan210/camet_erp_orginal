@@ -12,7 +12,7 @@ function ItemRegisterComponent({
   sendToParent,
   editData
 }) {
-
+console.log(optionsData)
   const [priceLevelRows, setPriceLevelRows] = useState([
     { pricelevel: "", pricerate: "" }
   ])
@@ -43,12 +43,19 @@ function ItemRegisterComponent({
         hsn: editData.hsn_code,
         imageUrl: editData.product_image || "" // Set existing image URL
       })
-      let updatedPriceLevel = editData.Priceleveles.map((item) => ({
+      const updatedPriceLevel = (Array.isArray(editData.Priceleveles)
+        ? editData.Priceleveles
+        : []
+      ).map((item) => ({
         pricelevel: item.pricelevel?._id,
         pricerate: item.pricerate
       }))
       // console.log("updatedPriceLevel", updatedPriceLevel);
-      setPriceLevelRows(updatedPriceLevel)
+      setPriceLevelRows(
+        updatedPriceLevel.length > 0
+          ? updatedPriceLevel
+          : [{ pricelevel: "", pricerate: "" }]
+      )
 
       // Set image preview for existing data
       if (editData.product_image) {
@@ -171,6 +178,7 @@ function ItemRegisterComponent({
 
   const handleChange = (e) => {
     const { name, value } = e.target
+    console.log(name, value)
     if (name === "itemCode") {
       setRoomData({ ...roomData, itemCode: value })
     } else if (name === "roomName") {
@@ -242,6 +250,8 @@ function ItemRegisterComponent({
    
     fileRef.current.click() // 🔥 open file picker
   }
+
+  console.log("optionsData",optionsData)
 
  
   return (
@@ -395,11 +405,19 @@ function ItemRegisterComponent({
                 onChange={handleChange}
               >
                 <option value="">Select food type</option>
-                {optionsData?.subcategory?.map((option, index) => (
-                  <option key={index} value={option?._id}>
-                    {option?.name}
-                  </option>
-                ))}
+
+{roomData.foodCategory &&
+  optionsData?.subcategory
+    ?.filter(
+      (option) =>
+        String(option?.category || option?.category_id) ===
+        String(roomData.foodCategory)
+    )
+    .map((option, index) => (
+      <option key={index} value={option?._id}>
+        {option?.name}
+      </option>
+    ))}
               </select>
             </div>
           </div>

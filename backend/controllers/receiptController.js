@@ -1,3 +1,4 @@
+import { prepareVoucherParty } from "../helpers/voucherPartyHelper.js";
 import {
   checkForNumberExistence,
   getNewSerialNumber,
@@ -21,8 +22,10 @@ import settlementModel from "../models/settlementModel.js";
 
 import salesModel from "../models/salesModel.js";       // adjust path
 import VoucherSeriesModel from "../models/VoucherSeriesModel.js";
-
+import { sendMail } from "../helpers/hotelHelper.js";
+import primaryUserModel from "../models/primaryUserModel.js";
 export const createReceipt = async (req, res) => {
+  if (!await prepareVoucherParty(req, res)) return;
   const {
     date,
     receiptNumber,
@@ -238,6 +241,7 @@ export const cancelReceipt = async (req, res) => {
 
     // Mark the receipt as cancelled
     receipt.isCancelled = true;
+    receipt.cancelReason = req?.body?.cancelReason;
     receipt.cancelledAt = new Date();
     receipt.cancelledBy = req.sUserId;
     receipt.cancelledByName = req.suser?.name || "";
@@ -248,12 +252,44 @@ export const cancelReceipt = async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
+    let primaryUserData = await primaryUserModel.findById(req.owner);
+    
+        if (!primaryUserData || !primaryUserData?.email) {
+          res.status(200).json({
+            success: true,
+            message: "Receipt cancelled successfully but email not sent",
+            data: sale,
+          });
+        }
+    
+        await sendMail({
+          to: primaryUserData?.email,
+          cc: [],
+          subject: `Receipt Cancelled Alert - ${receipt?.receiptNumber}`,
+          fromName: "Cancel Receipt",
+          text: `Receipt ${receipt?.receiptNumber} has been cancelled by ${req?.secUserName || primaryUserData?.userName || "System"}. Please check the attached cancelled KOT copy.`,
+          html: `
+            <div style="font-family: Arial, sans-serif;">
+              <h2 style="color:#b91c1c;">Receipt Cancelled Alert</h2>
+              <p>Receipt <strong>${receipt?.receiptNumber}</strong> has been cancelled.</p>
+              <p><strong>Cancelled By:</strong> ${req?.secUserName || primaryUserData?.userName || "System"}</p>
+              <p><strong>Reason:</strong> ${req?.body?.cancelReason || "Reason not given"}</p>
+    
+              <p><strong>Total:</strong> ₹ ${receipt?.enteredAmount || 0}</p>
+              
+            </div>
+          `,
+          data: receipt,
+        });
+
     res.status(200).json({
       success: true,
       message: "Receipt cancelled successfully",
     });
   } catch (error) {
-    await session.abortTransaction();
+     if (session?.inTransaction()) {
+      await session.abortTransaction();
+    }
     session.endSession();
 
     console.error("Error cancelling receipt:", error);
@@ -268,6 +304,7 @@ export const cancelReceipt = async (req, res) => {
  */
 
 export const editReceipt = async (req, res) => {
+  if (!await prepareVoucherParty(req, res)) return;
   const receiptId = req.params.receiptId;
   const Primary_user_id = req.owner.toString();
   const Secondary_user_id = req.sUserId;

@@ -1,3 +1,7 @@
+import { createSalesTransaction } from "../controllers/salesTransactionController.js";
+import { getPartyPurchases } from "../controllers/partyPurchasesController.js";
+import { getPartySales } from "../controllers/partySalesController.js";
+import { saveProformaInvoice, getProformaInvoiceDetails, listProformaInvoices, cancelProformaInvoice } from "../controllers/proformaInvoiceController.js";
 import express from 'express'
 const router = express.Router();
 import {
@@ -84,7 +88,7 @@ import {
     getSalesByCheckInNumber,
     updateRestaurantSalePayments,
     getRestaurantSales,getTravelAgentSalesReport,getAgentList,getFOSalesSummary,
-    getCancellationReport,additionalPaxDefaultSetting,getDefault,getDefaultPlan,getSpecificDataForPrint
+    getCancellationReport,additionalPaxDefaultSetting,getDefault,getDefaultPlan,getSpecificDataForPrint,loginReport,loginReportExport
 } from '../controllers/hotelController.js'
 
 import { convertCheckOutToSale } from '../controllers/hotelController2CheckOut.js';
@@ -99,9 +103,10 @@ import {
     updateTableStatus, getKotDataByTable, updateConfigurationForKotApproval, getSummaryDashboard, cancelKot, directSale, searchItems,getComplementaryCashOrBank
 ,addComplementaryCashOrBank,getRestaurantCategoryWiseSalesReport,getRestaurantDateWiseItemReport,
 getKotRegister,getRestaurantBillsDetails,getAllChecking,transferKotBills,
-getSalesRegister} from '../controllers/restaurantController.js'
+getSalesRegister , exportItemsToExcel , savePrinter} from '../controllers/restaurantController.js'
 
-
+import { uploadExcel } from '../middlewares/uploadExcel.js';
+import { importItemsFromExcel } from '../controllers/importProductForHotel.js';
 router.post('/login', login)
 router.post('/sendOtp', sendOtp)
 router.post('/submitOtp', submitOtp)
@@ -146,8 +151,15 @@ router.post('/addAditionalCharge/:cmp_id', authSecondary, secondaryIsBlocked, co
 router.delete('/deleteAdditionalCharge/:id/:cmp_id', authSecondary, secondaryIsBlocked, companyAuthentication, deleteAdditionalCharge)
 router.put('/EditAditionalCharge/:id/:cmp_id', authSecondary, secondaryIsBlocked, companyAuthentication, EditAditionalCharge)
 router.post('/addconfigurations/:cmp_id', authSecondary, secondaryIsBlocked, companyAuthentication, addconfigurations)
+router.post('/createPerformaInvoice', authSecondary, secondaryIsBlocked, saveProformaInvoice);
+router.post('/editPerformaInvoice/:id', authSecondary, secondaryIsBlocked, saveProformaInvoice);
+router.get('/getPerformaInvoiceDetails/:id', authSecondary, secondaryIsBlocked, getProformaInvoiceDetails);
+router.get('/performaInvoices/:cmp_id', authSecondary, secondaryIsBlocked, companyAuthentication, listProformaInvoices);
+router.put('/cancelPerformaInvoice/:id', authSecondary, secondaryIsBlocked, cancelProformaInvoice);
 router.post('/createSales', authSecondary, secondaryIsBlocked, createSale)
 router.post('/createVanSale', authSecondary, secondaryIsBlocked, createSale)
+router.get('/partySales/:cmp_id/:partyId', authSecondary, secondaryIsBlocked, companyAuthentication, getPartySales);
+router.get('/partyPurchases/:cmp_id/:partyId', authSecondary, secondaryIsBlocked, companyAuthentication, getPartyPurchases);
 router.get('/getSalesDetails/:id', authSecondary, secondaryIsBlocked, getSalesDetails)
 router.post('/saveSalesNumber/:cmp_id', authSecondary, secondaryIsBlocked, companyAuthentication, saveSalesNumber)
 router.get('/fetchAdditionalDetails/:cmp_id', authSecondary, secondaryIsBlocked, companyAuthentication, fetchAdditionalDetails)
@@ -178,6 +190,7 @@ router.post('/createPurchase', authSecondary, secondaryIsBlocked, createPurchase
 router.post('/editPurchase/:id', authSecondary, secondaryIsBlocked, editPurchase)
 router.put("/cancelpurchase/:id", authSecondary, secondaryIsBlocked, cancelPurchase)
 ///credit not routes
+router.post('/createSalesTransaction', authSecondary, secondaryIsBlocked, createSalesTransaction)
 router.post('/createCreditNote', authSecondary, secondaryIsBlocked, createCreditNote)
 router.get('/getCreditNoteDetails/:id', authSecondary, secondaryIsBlocked, getCreditNoteDetails)
 router.put('/cancelCreditNote/:id', authSecondary, secondaryIsBlocked, cancelCreditNote)
@@ -467,6 +480,20 @@ router.put("/defaultSetting/:cmp_id/:id/:selectedModal", authSecondary, addition
 router.get("/getDefaultPax/:cmp_id", authSecondary, getDefault);
 router.get("/getDefaultPlan/:cmp_id", authSecondary, getDefaultPlan);
 router.get("/specificDataForPrint/:cmp_id/:id/:under", authSecondary, getSpecificDataForPrint);
+router.get("/loginReport/:cmp_id",authSecondary , loginReport)
+router.get("/loginReportExport/:cmp_id",authSecondary , loginReportExport)
+router.get("/getItemsForExcel/:cmp_id",authSecondary , exportItemsToExcel)
+router.post(
+  "/importItemsFromExcel/:cmp_id",
+  authSecondary,
+  uploadExcel.single("file"),
+  importItemsFromExcel
+);
+router.post(
+  "/savePrinter/:cmp_id",
+  authSecondary,
+  savePrinter
+);
 // Route to get detailed booking information for a specific room and date
 
 export default router

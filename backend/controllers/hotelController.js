@@ -30,7 +30,11 @@ import {
   findBlockedRooms,
   getRoomMetricsForPeriod,
   fetchRestaurantDetails,
+  buildLoginReportFilter,
+  exportLoginReportPdf,
+  exportLoginReportExcel,
 } from "../helpers/hotelHelper.js";
+import { createReceiptsAndSettlements } from "../helpers/checkoutHelper.js";
 import { extractRequestParams } from "../helpers/productHelper.js";
 import { generateVoucherNumber } from "../helpers/voucherHelper.js";
 import mongoose, { get } from "mongoose";
@@ -61,6 +65,8 @@ import {
   ensureHotelTariffDateIsEditable,
   ensureSecondaryUserCompanyAccess,
 } from "../helpers/nightAuditHelper.js";
+import primaryUserModel from "../models/primaryUserModel.js";
+import { sendMail } from "../helpers/hotelHelper.js";
 // function used to save additional pax details
 export const saveAdditionalPax = async (req, res) => {
   try {
@@ -1088,6 +1094,17 @@ export const roomBooking = async (req, res) => {
         .session(session);
     }
 
+    const bookingRequestId = req.body?.bookingRequestId;
+    const checkInRequestId = req.body?.checkInRequestId;
+
+    if (isFor === "bookingPage" && !bookingRequestId) {
+      throw new Error("Missing booking request id");
+    }
+
+    if (isFor === "checkIn" && !checkInRequestId) {
+      throw new Error("Missing check-in request id");
+    }
+
     let selectedModal;
     let voucherType;
     let under = "hotel";
@@ -1158,7 +1175,9 @@ export const roomBooking = async (req, res) => {
         Secondary_user_id: req.sUserId,
         paymenttypeDetails,
         paymentMetaData: req?.body?.paymentData?.payments || [],
-
+        bookingRequestId:
+          isFor === "bookingPage" ? bookingRequestId : undefined,
+        checkInRequestId: isFor === "checkIn" ? checkInRequestId : undefined,
         isHotelAgent,
         currentDate: new Date().toISOString().split("T")[0],
         advanceTracking: {
@@ -1411,7 +1430,7 @@ export const getBookings = async (req, res) => {
     const params = extractRequestParamsForBookings(req);
     console.log("paramss", params);
     const filter = buildDatabaseFilterForBooking(params);
-
+    console.log("filter", filter);
     const { bookings = [], totalBookings = 0 } =
       await fetchBookingsFromDatabase(filter, params);
 
@@ -2301,9 +2320,7 @@ export const getallnoncheckoutCheckins = async (req, res) => {
       cmp_id,
       status: { $nin: ["checkOut", "cancelled"] },
     });
-    if (allnocheckoutcheckins && allnocheckoutcheckins.length) {
-      return res.json({ success: true, data: allnocheckoutcheckins });
-    }
+    return res.json({ success: true, data: allnocheckoutcheckins });
   } catch (error) {
     console.log("error", error.message);
     return res.status(500).json({
@@ -4167,7 +4184,13 @@ export const swapRoom = async (req, res) => {
     await session.startTransaction();
 
     const { checkInId } = req.params;
-    const { newRoomId, oldRoomId, selectedDate, formData = {} } = req.body;
+    const {
+      newRoomId,
+      oldRoomId,
+      oldSelectedRoomId,
+      selectedDate,
+      formData = {},
+    } = req.body;
 
     if (!checkInId || !newRoomId || !oldRoomId) {
       return res.status(400).json({
@@ -4185,16 +4208,32 @@ export const swapRoom = async (req, res) => {
       });
     }
 
-    const oldSelectedRoomIndex = checkIn.selectedRooms.findIndex((room) => {
-      const roomId =
-        room?.roomId?._id?.toString?.() || room?.roomId?.toString?.();
-      return roomId === oldRoomId.toString();
-    });
+    const oldSelectedRoomIndex = oldSelectedRoomId
+      ? checkIn.selectedRooms.findIndex(
+          (room) => String(room?._id || "") === String(oldSelectedRoomId),
+        )
+      : checkIn.selectedRooms.findIndex((room) => {
+          const roomId =
+            room?.roomId?._id?.toString?.() || room?.roomId?.toString?.();
+          return roomId === oldRoomId.toString();
+        });
 
     if (oldSelectedRoomIndex === -1) {
       return res.status(400).json({
         success: false,
         message: "Old room not found in selected rooms",
+      });
+    }
+
+    const oldSelectedRoomMasterId = String(
+      checkIn.selectedRooms[oldSelectedRoomIndex]?.roomId?._id ||
+        checkIn.selectedRooms[oldSelectedRoomIndex]?.roomId ||
+        "",
+    );
+    if (oldSelectedRoomId && oldSelectedRoomMasterId !== String(oldRoomId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Selected room does not match the old room",
       });
     }
 
@@ -4296,6 +4335,7 @@ export const swapRoom = async (req, res) => {
 
     const newSelectedRoom = {
       ...selectedRoomToAdd,
+      _id: new mongoose.Types.ObjectId(),
       swappingDateFrom: selectedDate,
       isSwapped: false,
     };
@@ -4327,10 +4367,11 @@ export const swapRoom = async (req, res) => {
     }
 
     checkIn.roomSwapHistory.push({
+      fromSelectedRoomId: oldSelectedRoom._id,
+      toSelectedRoomId: newSelectedRoom._id,
       fromRoomId: oldRoomId,
       toRoomId: newRoomId,
-      swapDate: new Date(),
-      selectedDate,
+      swapDate: selectedDate,
       reason: "Guest requested room change",
     });
 
@@ -5188,10 +5229,11 @@ export const cancelBooking = async (req, res) => {
 
     let responseData = null;
     let responseMessage = "";
-
+    let record = {};
+    let recordType = "";
     await session.withTransaction(async () => {
-      let record = await Booking.findById(id).session(session);
-      let recordType = "booking";
+      record = await Booking.findById(id).session(session);
+      recordType = "booking";
 
       if (!record) {
         record = await CheckIn.findById(id).session(session);
@@ -5226,6 +5268,43 @@ export const cancelBooking = async (req, res) => {
       responseMessage = `${
         recordType === "checkin" ? "Check-in" : "Booking"
       } ${record.voucherNumber} has been cancelled successfully and room marked as dirty`;
+    });
+
+    let heading =
+      recordType == "checkin"
+        ? "Check-in"
+        : recordType == "booking"
+          ? "Booking"
+          : "Checkout";
+
+    let primaryUserData = await primaryUserModel.findById(req.owner);
+
+    if (!primaryUserData || !primaryUserData?.email) {
+      res.status(200).json({
+        success: true,
+        message: `${heading}cancelled successfully but email not sent`,
+        data: sale,
+      });
+    }
+
+    await sendMail({
+      to: primaryUserData?.email,
+      cc: [],
+      subject: `${heading} Cancelled Alert - ${record?.voucherNumber}`,
+      fromName: `Cancel ${heading}`,
+      text: `${heading} ${record?.voucherNumber} has been cancelled by ${req?.secUserName || primaryUserData?.userName || "System"}. Please check the attached cancelled KOT copy.`,
+      html: `
+                <div style="font-family: Arial, sans-serif;">
+                  <h2 style="color:#b91c1c;">${heading} Cancelled Alert</h2>
+                <p>${heading} <strong>${record?.voucherNumber}</strong> has been cancelled.</p>
+                  <p><strong>Cancelled By:</strong> ${req?.secUserName || primaryUserData?.userName || "System"}</p>
+                  <p><strong>Reason:</strong> ${req?.body?.cancelReason || "Reason not given"}</p>
+        
+                  <p><strong>Total:</strong> ₹ ${record?.grandTotal || 0}</p>
+                  
+                </div>
+              `,
+      data: record,
     });
 
     return res.status(200).json({
@@ -5991,7 +6070,7 @@ export const getTouristReport = async (req, res) => {
       cmp_id: new mongoose.Types.ObjectId(cmp_id),
     };
 
-    const report = await CheckIn.aggregate([
+    const [reportGroups] = await CheckIn.aggregate([
       { $match: match },
 
       {
@@ -6044,24 +6123,23 @@ export const getTouristReport = async (req, res) => {
       },
 
       {
-        $group: {
-          _id: "$groupedCountry",
-          pax: { $sum: "$totalPax" },
-          bookings: { $sum: 1 },
+        $facet: {
+          countries: [
+            { $group: { _id: "$groupedCountry", pax: { $sum: "$totalPax" }, bookings: { $sum: 1 } } },
+            { $project: { _id: 0, nation: "$_id", pax: 1, bookings: 1 } },
+            { $sort: { pax: -1, nation: 1 } },
+          ],
+          states: [
+            { $addFields: { normalizedState: { $toUpper: { $trim: { input: { $ifNull: ["$guestState", ""] } } } } } },
+            { $group: { _id: { $cond: [{ $eq: ["$normalizedState", ""] }, "UNKNOWN", "$normalizedState"] }, pax: { $sum: "$totalPax" }, bookings: { $sum: 1 } } },
+            { $project: { _id: 0, state: "$_id", pax: 1, bookings: 1 } },
+            { $sort: { pax: -1, state: 1 } },
+          ],
         },
       },
-
-      {
-        $project: {
-          _id: 0,
-          nation: "$_id",
-          pax: 1,
-          bookings: 1,
-        },
-      },
-
-      { $sort: { pax: -1, nation: 1 } },
     ]);
+    const report = reportGroups?.countries || [];
+    const stateReport = reportGroups?.states || [];
     const unknownCountryDocs = await CheckIn.aggregate([
       { $match: match },
 
@@ -6123,13 +6201,16 @@ export const getTouristReport = async (req, res) => {
         fromDate,
         toDate,
         countryField: "guestCountry",
+        stateField: "guestState",
       },
       summary: {
         totalNations: report.length,
+        totalStates: stateReport.length,
         totalPax,
         totalBookings,
       },
       data: report,
+      stateData: stateReport,
     });
   } catch (error) {
     console.error("getTouristReport error:", error);
@@ -6456,250 +6537,156 @@ export const getOccupancyCheckoutReport = async (req, res) => {
       additionalPaxTotal += additionalPaxCount;
 
       const normalizeDate = (value) => {
-  const d = new Date(value);
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
+        const d = new Date(value);
+        d.setHours(0, 0, 0, 0);
+        return d;
+      };
 
-const addOneDay = (value) => {
-  const d = new Date(value);
-  d.setDate(d.getDate() + 1);
-  d.setHours(0, 0, 0, 0);
-  return d;
-};
+      const addOneDay = (value) => {
+        const d = new Date(value);
+        d.setDate(d.getDate() + 1);
+        d.setHours(0, 0, 0, 0);
+        return d;
+      };
 
-const overlaps = (start1, end1, start2, end2) => {
-  return start1 < end2 && start2 < end1;
-};
-  // (doc?.selectedRooms || []).forEach((room) => {
-  //       if (room.isSwapped ) return;
-  //       const pax = Number(room?.pax || 0);
-  //       const tariff = Number(
-  //         Math.round(room.priceLevelRate) ||
-  //           room?.baseAmount ||
-  //           room?.amountAfterTax ||
-  //           room?.totalAmount ||
-  //           room?.baseAmountWithTax ||
-  //           0,
-  //       );
+      const overlaps = (start1, end1, start2, end2) => {
+        return start1 < end2 && start2 < end1;
+      };
 
-  //       roomRevenue += tariff;
-  //       occupiedRoomNames.add(room?.roomName);
+      (doc?.selectedRooms || []).forEach((room) => {
+        const bookingStart = normalizeDate(
+          doc?.arrivalDateObj || doc?.arrivalDate,
+        );
+        const bookingEnd = normalizeDate(
+          doc?.newChecoutDate || doc?.checkOutDate,
+        );
 
-  //       const roomTypeName =
-  //         room?.roomType?.roomTypeName || room?.roomType?.name || "";
+        const filterStart = fromDate ? normalizeDate(fromDate) : null;
+        const filterEnd = toDate ? addOneDay(toDate) : null;
 
-  //       const type = roomTypeName.toLowerCase();
-  //       let single = 0;
-  //       let doubleRoom = 0;
-  //       let triple = 0;
-  //       let other = 0;
+        let roomStart = bookingStart;
+        let roomEnd = bookingEnd;
 
-  //       if (type.includes("single")) single += 1;
-  //       else if (type.includes("double")) doubleRoom += 1;
-  //       else if (type.includes("triple")) triple += 1;
-  //       else other += 1;
+        const currentRoomId = room?.roomId?.toString();
 
-  //       let planName = "";
-  //       if (Array.isArray(doc?.foodPlan) && doc.foodPlan.length > 0) {
-  //         const foundPlan = doc.foodPlan.filter(
-  //           (plan) => plan?.roomId?.toString() === room?.roomId?.toString(),
-  //         );
-  //         const getPlanNames = (plans = []) =>
-  //           plans
-  //             .map((p) => p?.foodPlan)
-  //             .filter(Boolean)
-  //             .join(", ") || "";
+        if (
+          Array.isArray(doc?.roomSwapHistory) &&
+          doc.roomSwapHistory.length > 0
+        ) {
+          doc.roomSwapHistory.forEach((swap) => {
+            const fromRoomId = swap?.fromRoomId?.toString();
+            const toRoomId = swap?.toRoomId?.toString();
+            const swapDate = swap?.swapDate
+              ? normalizeDate(swap.swapDate)
+              : null;
 
-  //         if (foundPlan.length >= 0) {
-  //           foundPlan.map((plan) => {
-  //             planName = plan.foodPlan;
-  //             if (!planMap[plan.foodPlan]) {
-  //               planMap[plan.foodPlan] = {
-  //                 plan: plan.foodPlan,
-  //                 rms: 0,
-  //                 pax: 0,
-  //                 addnl: 0,
-  //                 total: 0,
-  //               };
-  //             }
+            if (!swapDate) return;
 
-  //             planMap[plan.foodPlan].rms += 1;
-  //             planMap[plan.foodPlan].pax += pax;
-  //             planMap[plan.foodPlan].addnl += additionalPaxCount;
-  //             planMap[plan.foodPlan].total += pax + additionalPaxCount;
-  //           });
-  //           if (!planMap[planName]) {
-  //             planMap[planName] = {
-  //               plan: planName,
-  //               rms: 0,
-  //               pax: 0,
-  //               addnl: 0,
-  //               total: 0,
-  //             };
-  //           }
+            if (currentRoomId === fromRoomId) {
+              roomEnd = swapDate;
+            }
 
-  //           planMap[planName].rms += 1;
-  //           planMap[planName].pax += pax;
-  //           planMap[planName].addnl += additionalPaxCount;
-  //           planMap[planName].total += pax + additionalPaxCount;
-  //         }
-  //       }
-
-  //       let extraPersonTariff =
-  //         doc?.additionalPaxDetails?.reduce((acc, item) => {
-  //           return item?.roomId?.toString() === room?.roomId?.toString()
-  //             ? acc + (item?.rate || 0)
-  //             : acc;
-  //         }, 0) || 0;
-
-  //       let additionalPax =
-  //         doc?.additionalPaxDetails?.filter(
-  //           (item) => item?.roomId.toString() == room?.roomId.toString(),
-  //         ).length || 0;
-
-  //       rows.push({
-  //         slNo: rows.length + 1,
-  //         room: room?.roomName || "",
-  //         grcNo: doc?.grcno || "",
-  //         guestName: doc?.guestName || doc?.customerName || "",
-  //         company: doc?.company || "",
-  //         pax,
-  //         additionalPax,
-  //         arrivalDate: doc?.arrivalDate || "",
-  //         arrivalTime: doc?.arrivalTime || "",
-  //         departureDate: doc?.newChecoutDate || doc?.checkOutDate || "",
-  //         departureTime: doc?.newCheckoutTime || doc?.checkOutTime || "",
-  //         plan: planName,
-  //         tariff,
-  //         extraPersonTariff,
-  //         totalTariffWithPax: extraPersonTariff + tariff,
-  //         discountPercent: 0,
-  //         discountAmount: 0,
-  //       });
-  //     });
-
-    (doc?.selectedRooms || []).forEach((room) => {
-  const bookingStart = normalizeDate(doc?.arrivalDateObj || doc?.arrivalDate);
-  const bookingEnd = normalizeDate(doc?.newChecoutDate || doc?.checkOutDate);
-
-  const filterStart = fromDate ? normalizeDate(fromDate) : null;
-  const filterEnd = toDate ? addOneDay(toDate) : null;
-
-  let roomStart = bookingStart;
-  let roomEnd = bookingEnd;
-
-  const currentRoomId = room?.roomId?.toString();
-
-  if (Array.isArray(doc?.roomSwapHistory) && doc.roomSwapHistory.length > 0) {
-    doc.roomSwapHistory.forEach((swap) => {
-      const fromRoomId = swap?.fromRoomId?.toString();
-      const toRoomId = swap?.toRoomId?.toString();
-      const swapDate = swap?.swapDate ? normalizeDate(swap.swapDate) : null;
-
-      if (!swapDate) return;
-
-      if (currentRoomId === fromRoomId) {
-        roomEnd = swapDate;
-      }
-
-      if (currentRoomId === toRoomId) {
-        roomStart = swapDate;
-      }
-    });
-  }
-
-  if (filterStart && filterEnd && !overlaps(roomStart, roomEnd, filterStart, filterEnd)) {
-    return;
-  }
-
-  const pax = Number(room?.pax || 0);
-  const tariff = Number(
-    Math.round(room.priceLevelRate) ||
-      room?.baseAmount ||
-      room?.amountAfterTax ||
-      room?.totalAmount ||
-      room?.baseAmountWithTax ||
-      0
-  );
-
-  roomRevenue += tariff;
-  occupiedRoomNames.add(room?.roomName);
-
-  const roomTypeName =
-    room?.roomType?.roomTypeName || room?.roomType?.name || "";
-
-  const type = roomTypeName.toLowerCase();
-  let single = 0;
-  let doubleRoom = 0;
-  let triple = 0;
-  let other = 0;
-
-  if (type.includes("single")) single += 1;
-  else if (type.includes("double")) doubleRoom += 1;
-  else if (type.includes("triple")) triple += 1;
-  else other += 1;
-
-  let planName = "";
-  if (Array.isArray(doc?.foodPlan) && doc.foodPlan.length > 0) {
-    const foundPlan = doc.foodPlan.filter(
-      (plan) => plan?.roomId?.toString() === room?.roomId?.toString()
-    );
-
-    if (foundPlan.length > 0) {
-      foundPlan.forEach((plan) => {
-        planName = plan.foodPlan;
-
-        if (!planMap[plan.foodPlan]) {
-          planMap[plan.foodPlan] = {
-            plan: plan.foodPlan,
-            rms: 0,
-            pax: 0,
-            addnl: 0,
-            total: 0,
-          };
+            if (currentRoomId === toRoomId) {
+              roomStart = swapDate;
+            }
+          });
         }
 
-        planMap[plan.foodPlan].rms += 1;
-        planMap[plan.foodPlan].pax += pax;
-        planMap[plan.foodPlan].addnl += additionalPaxCount;
-        planMap[plan.foodPlan].total += pax + additionalPaxCount;
+        if (
+          filterStart &&
+          filterEnd &&
+          !overlaps(roomStart, roomEnd, filterStart, filterEnd)
+        ) {
+          return;
+        }
+
+        const pax = Number(room?.pax || 0);
+        const tariff = Number(
+          Math.round(room.priceLevelRate) ||
+            room?.baseAmount ||
+            room?.amountAfterTax ||
+            room?.totalAmount ||
+            room?.baseAmountWithTax ||
+            0,
+        );
+
+        roomRevenue += tariff;
+        occupiedRoomNames.add(room?.roomName);
+
+        const roomTypeName =
+          room?.roomType?.roomTypeName || room?.roomType?.name || "";
+
+        const type = roomTypeName.toLowerCase();
+        let single = 0;
+        let doubleRoom = 0;
+        let triple = 0;
+        let other = 0;
+
+        if (type.includes("single")) single += 1;
+        else if (type.includes("double")) doubleRoom += 1;
+        else if (type.includes("triple")) triple += 1;
+        else other += 1;
+
+        let planName = "";
+        if (Array.isArray(doc?.foodPlan) && doc.foodPlan.length > 0) {
+          const foundPlan = doc.foodPlan.filter(
+            (plan) => plan?.roomId?.toString() === room?.roomId?.toString(),
+          );
+
+          if (foundPlan.length > 0) {
+            foundPlan.forEach((plan) => {
+              planName = plan.foodPlan;
+
+              if (!planMap[plan.foodPlan]) {
+                planMap[plan.foodPlan] = {
+                  plan: plan.foodPlan,
+                  rms: 0,
+                  pax: 0,
+                  addnl: 0,
+                  total: 0,
+                };
+              }
+
+              planMap[plan.foodPlan].rms += 1;
+              planMap[plan.foodPlan].pax += pax;
+              planMap[plan.foodPlan].addnl += additionalPaxCount;
+              planMap[plan.foodPlan].total += pax + additionalPaxCount;
+            });
+          }
+        }
+
+        const extraPersonTariff =
+          doc?.additionalPaxDetails?.reduce((acc, item) => {
+            return item?.roomId?.toString() === room?.roomId?.toString()
+              ? acc + Number(item?.rate || 0)
+              : acc;
+          }, 0) || 0;
+
+        const additionalPax =
+          doc?.additionalPaxDetails?.filter(
+            (item) => item?.roomId?.toString() === room?.roomId?.toString(),
+          ).length || 0;
+
+        rows.push({
+          slNo: rows.length + 1,
+          room: room?.roomName || "",
+          grcNo: doc?.grcno || "",
+          guestName: doc?.guestName || doc?.customerName || "",
+          company: doc?.company || "",
+          pax,
+          additionalPax,
+          arrivalDate: doc?.arrivalDate || "",
+          arrivalTime: doc?.arrivalTime || "",
+          departureDate: doc?.newChecoutDate || doc?.checkOutDate || "",
+          departureTime: doc?.newCheckoutTime || doc?.checkOutTime || "",
+          plan: planName,
+          tariff: tariff - extraPersonTariff,
+          extraPersonTariff,
+          totalTariffWithPax: tariff,
+          discountPercent: 0,
+          discountAmount: 0,
+        });
       });
-    }
-  }
-
-  const extraPersonTariff =
-    doc?.additionalPaxDetails?.reduce((acc, item) => {
-      return item?.roomId?.toString() === room?.roomId?.toString()
-        ? acc + Number(item?.rate || 0)
-        : acc;
-    }, 0) || 0;
-
-  const additionalPax =
-    doc?.additionalPaxDetails?.filter(
-      (item) => item?.roomId?.toString() === room?.roomId?.toString()
-    ).length || 0;
-
-  rows.push({
-    slNo: rows.length + 1,
-    room: room?.roomName || "",
-    grcNo: doc?.grcno || "",
-    guestName: doc?.guestName || doc?.customerName || "",
-    company: doc?.company || "",
-    pax,
-    additionalPax,
-    arrivalDate: doc?.arrivalDate || "",
-    arrivalTime: doc?.arrivalTime || "",
-    departureDate: doc?.newChecoutDate || doc?.checkOutDate || "",
-    departureTime: doc?.newCheckoutTime || doc?.checkOutTime || "",
-    plan: planName,
-    tariff,
-    extraPersonTariff,
-    totalTariffWithPax: extraPersonTariff + tariff,
-    discountPercent: 0,
-    discountAmount: 0,
-  });
-});
     });
 
     const totalRooms = allRooms.length;
@@ -7261,8 +7248,966 @@ export const buildEmbeddedParty = (party, { gstNo, address } = {}) => ({
   newAddress: party.newAddress || {},
 });
 
+// export const updateCheckout = async (req, res) => {
+//   const session = await mongoose.startSession();
+
+//   try {
+//     session.startTransaction();
+
+//     const { id } = req.params;
+//     const { cmp_id } = req.query;
+
+//     if (!id || !cmp_id) {
+//       await session.abortTransaction();
+//       session.endSession();
+//       return res.status(400).json({ message: "id and cmp_id are required" });
+//     }
+
+//     const sale = await salesModel.findOne({ _id: id, cmp_id }).session(session);
+
+//     if (!sale) {
+//       await session.abortTransaction();
+//       session.endSession();
+//       return res.status(404).json({ message: "Sale not found" });
+//     }
+
+//     const { partyId, gstNo, address, payments = [] } = req.body;
+
+//     if (!partyId) {
+//       await session.abortTransaction();
+//       session.endSession();
+//       return res.status(400).json({ message: "partyId is required" });
+//     }
+
+//     const party = await Party.findOne({ _id: partyId, cmp_id }).session(
+//       session,
+//     );
+
+//     if (!party) {
+//       await session.abortTransaction();
+//       session.endSession();
+//       return res.status(404).json({ message: "Party not found" });
+//     }
+
+//     // ── Helper: map sourceType to settlement sourceType enum ──
+//     // cash → "cash", everything else (bank/upi/card) → "bank"
+//     const toSourceType = (sourceType) => {
+//       return sourceType?.toLowerCase() === "cash" ? "cash" : "bank";
+//     };
+
+//     // ── Update sale party ──
+//     sale.party = buildEmbeddedParty(party, { gstNo, address });
+//     sale.markModified("party");
+
+//     // ── Update payment splits by index ──
+//     payments.forEach((payment, index) => {
+//       const matchingPayment = sale.paymentSplittingData[index];
+//       if (!matchingPayment) return;
+
+//       matchingPayment.ref_id = payment.source || matchingPayment.ref_id;
+//       matchingPayment.source = payment.source || matchingPayment.source;
+//       matchingPayment.type =
+//         payment.sourceType?.toLowerCase() || matchingPayment.type;
+//       matchingPayment.sourceType =
+//         payment.sourceType?.toLowerCase() || matchingPayment.sourceType;
+//       matchingPayment.subsource =
+//         payment.subsource || matchingPayment.subsource;
+//       matchingPayment.remarks = payment.remarks ?? matchingPayment.remarks;
+//       matchingPayment.customer = party._id;
+//       matchingPayment.customerName = party.partyName;
+//     });
+
+//     sale.markModified("paymentSplittingData");
+//     await sale.save({ session });
+
+//     // ── Fetch all receipts linked to this sale ──
+//     const receipts = await ReceiptModel.find({
+//       cmp_id,
+//       "billData.bill_no": sale.salesNumber,
+//     }).session(session);
+
+//     if (receipts.length > 0) {
+//       await Promise.all(
+//         receipts.map(async (receipt, index) => {
+//           // 1. Update party
+//           receipt.party = buildEmbeddedParty(party, { gstNo, address });
+//           receipt.markModified("party");
+
+//           // 2. Match by index
+//           const matchedPayment = sale.paymentSplittingData[index] || null;
+
+//           if (matchedPayment) {
+//             const isCash = matchedPayment.sourceType?.toLowerCase() === "cash";
+
+//             if (isCash) {
+//               receipt.paymentMethod = "Cash";
+//               receipt.paymentDetails.cash_id =
+//                 matchedPayment.source || receipt.paymentDetails.cash_id;
+//               receipt.paymentDetails.cash_ledname =
+//                 matchedPayment.subsource || receipt.paymentDetails.cash_ledname;
+//               receipt.paymentDetails.cash_name =
+//                 matchedPayment.subsource || receipt.paymentDetails.cash_name;
+//               receipt.paymentDetails.bank_id = null;
+//               receipt.paymentDetails.bank_ledname = "";
+//               receipt.paymentDetails.bank_name = "";
+//             } else {
+//               receipt.paymentMethod =
+//                 matchedPayment.sourceType || receipt.paymentMethod;
+//               receipt.paymentDetails.bank_id =
+//                 matchedPayment.source || receipt.paymentDetails.bank_id;
+//               receipt.paymentDetails.bank_ledname =
+//                 matchedPayment.subsource || receipt.paymentDetails.bank_ledname;
+//               receipt.paymentDetails.bank_name =
+//                 matchedPayment.subsource || receipt.paymentDetails.bank_name;
+//               receipt.paymentDetails.cash_id = null;
+//               receipt.paymentDetails.cash_ledname = "";
+//               receipt.paymentDetails.cash_name = "";
+//             }
+
+//             receipt.markModified("paymentDetails");
+//           }
+
+//           await receipt.save({ session });
+//         }),
+//       );
+//     }
+
+//     // ── Update Checkout ──
+//     const checkout = await CheckOut.findOne({
+//       cmp_id,
+//       voucherNumber: sale.salesNumber,
+//     }).session(session);
+
+//     if (!checkout) {
+//       await session.abortTransaction();
+//       session.endSession();
+//       return res
+//         .status(404)
+//         .json({ message: "Checkout not found for this sale" });
+//     }
+
+//     payments.forEach((payment, index) => {
+//       const matchingPayment = checkout.checkoutpaymenttypedetails[index];
+//       if (!matchingPayment) return;
+
+//       matchingPayment.mode =
+//         payment.sourceType?.toLowerCase() || matchingPayment.mode;
+//       matchingPayment._id = payment.source || matchingPayment._id;
+//       matchingPayment.customerName =
+//         party.partyName || matchingPayment.customerName;
+//     });
+
+//     checkout.markModified("checkoutpaymenttypedetails");
+
+//     // ── Payment totals for checkout ──
+//     const paymentTotals = { cash: 0, bank: 0, upi: 0, credit: 0, card: 0 };
+
+//     sale.paymentSplittingData.forEach((p) => {
+//       const type = p.sourceType?.toLowerCase() || p.type?.toLowerCase();
+//       const amount = parseFloat(p.amount?.toString() || "0");
+//       if (type === "cash") paymentTotals.cash += amount;
+//       else if (type === "bank") paymentTotals.bank += amount;
+//       else if (type === "upi") paymentTotals.upi += amount;
+//       else if (type === "credit") paymentTotals.credit += amount;
+//       else if (type === "card") paymentTotals.card += amount;
+//     });
+
+//     checkout.paymenttypeDetails = paymentTotals;
+//     checkout.markModified("paymenttypeDetails");
+
+//     /// update guest info of checkout accriding to party
+
+//     checkout.guestId = party._id || checkout.guestId;
+//     checkout.guestName = party.partyName || checkout.guestName;
+//     // checkout.guestCountry=party._id;
+//     checkout.guestState =
+//       statesData.find((el) => el?.stateCode === party?.state_reference) ||
+//       checkout.guestState;
+//     checkout.guestPinCode = party.guestPinCode || checkout.guestPinCode;
+//     checkout.guestDetailedAddress = address || checkout.guestDetailedAddress;
+//     checkout.guestMobileNumber =
+//       party.mobileNumber || checkout.guestMobileNumber;
+//     checkout.gstNo = gstNo || checkout.gstNo;
+
+//     await checkout.save({ session });
+
+//     // ── Update Settlements ──
+//     // Fetch all settlements for receipt voucher numbers
+
+//     const receiptVoucherNumbers = receipts
+//       .map((r) => r.receiptNumber)
+//       .filter(Boolean);
+
+//     const settlements = await settlementModel
+//       .find({
+//         cmp_id,
+//         voucherNumber: { $in: receiptVoucherNumbers },
+//       })
+//       .session(session);
+
+//     // console.log("receipts", receipts);
+//     // console.log("receiptVoucherNumbers", receiptVoucherNumbers);
+//     // console.log("settlements", settlements);
+
+//     if (settlements.length > 0) {
+//       await Promise.all(
+//         settlements.map(async (settlement, index) => {
+//           const matchedPayment = sale.paymentSplittingData[index] || null;
+
+//           // Always update party info
+//           settlement.partyId = party._id;
+//           settlement.partyName = party.partyName;
+//           settlement.partyType = party.partyType || "party"; // from Party document
+
+//           if (matchedPayment) {
+//             const rawType = matchedPayment.sourceType?.toLowerCase();
+
+//             settlement.sourceId = matchedPayment.source || settlement.sourceId;
+//             settlement.sourceType = toSourceType(rawType); // "cash" | "bank"
+//             settlement.payment_mode = rawType || settlement.payment_mode; // "cash" | "bank" | "upi" | "card"
+//           }
+
+//           await settlement.save({ session });
+//         }),
+//       );
+//     }
+
+//     // console.log("sale party", sale.party); /* */
+//     // console.log("sale paymentSplittingData", sale.paymentSplittingData); /* */
+//     // console.log("receipts party", receipts.party);
+//     // console.log(
+//     //   "receipts party",
+//     //   receipts.map((r) => r.party),
+//     // );
+//     // console.log(
+//     //   "receipts paymentDetails",
+//     //   receipts.map((r) => r.paymentDetails),
+//     // );
+//     // console.log(
+//     //   "checkout checkoutpaymenttypedetails",
+//     //   checkout.checkoutpaymenttypedetails,
+//     // );
+
+//     // /log settlements
+//     console.log(
+//       "settlements after update",
+//       settlements.map((s) => ({
+//         partyId: s.partyId,
+//         partyName: s.partyName,
+//         partyType: s.partyType,
+//         sourceId: s.sourceId,
+//         sourceType: s.sourceType,
+//         payment_mode: s.payment_mode,
+//       })),
+//     );
+
+//     // ── Commit ──
+//     await session.commitTransaction();
+//     session.endSession();
+
+//     // console.log("receipt",rece);
+
+//     return res.status(200).json({
+//       success: true,
+//       message: "Sale updated successfully",
+//       data: sale,
+//     });
+//   } catch (error) {
+//     await session.abortTransaction();
+//     session.endSession();
+
+//     console.error("updateCheckout error:", error);
+//     return res.status(500).json({
+//       message: "Server error",
+//       error: error.message,
+//     });
+//   }
+// };
+
 export const updateCheckout = async (req, res) => {
   const session = await mongoose.startSession();
+  const requestCmpId = req.query?.cmp_id;
+
+  /*
+   * Convert all paymentId values to one consistent Map key.
+   *
+   * A request may contain a string while MongoDB documents contain
+   * ObjectId values. Both must resolve to the same payment split.
+   */
+  const getPaymentIdKey = (paymentId) => {
+    if (paymentId === undefined || paymentId === null) {
+      return null;
+    }
+
+    return paymentId.toString();
+  };
+
+  /*
+   * Convert a Mongoose document/subdocument into a plain object.
+   */
+  const toPlainObject = (value) => {
+    if (!value) {
+      return {};
+    }
+
+    if (typeof value.toObject === "function") {
+      return value.toObject({
+        depopulate: true,
+        virtuals: false,
+        getters: false,
+      });
+    }
+
+    return { ...value };
+  };
+
+  /*
+   * Normalize payment-mode values before comparing transitions.
+   */
+  const normalizePaymentType = (sourceType) => {
+    if (typeof sourceType !== "string") {
+      return "";
+    }
+
+    return sourceType.trim().toLowerCase();
+  };
+
+  /*
+   * Existing data may contain the mode in either sourceType or type.
+   */
+  const getPaymentType = (payment) => {
+    return normalizePaymentType(payment?.sourceType || payment?.type);
+  };
+
+  const isCreditPayment = (paymentType) => {
+    return normalizePaymentType(paymentType) === "credit";
+  };
+
+  const isImmediatePayment = (paymentType) => {
+    const normalizedType = normalizePaymentType(paymentType);
+
+    return ["cash", "bank", "upi", "card", "cheque"].includes(normalizedType);
+  };
+
+  /*
+   * Settlement sourceType supports the broad accounting source.
+   *
+   * UPI, Card and Cheque are bank-side sources, while payment_mode
+   * stores the exact payment mode.
+   */
+  const toSettlementSourceType = (paymentType) => {
+    return normalizePaymentType(paymentType) === "cash" ? "cash" : "bank";
+  };
+
+  /*
+   * Build a strict paymentId Map.
+   *
+   * This is suitable for:
+   *
+   * - Sale payments
+   * - Request payments
+   * - Checkout payment rows
+   * - Tally records
+   *
+   * It must not be used on all Receipt or Settlement history because
+   * cancelled and newly created records may share the same paymentId.
+   */
+  const createStrictPaymentMap = (
+    records,
+    recordName,
+    { paymentIdRequired = false } = {},
+  ) => {
+    const map = new Map();
+
+    for (const record of records || []) {
+      console.log("records", records);
+      const paymentIdKey = getPaymentIdKey(record?.paymentId);
+
+      if (!paymentIdKey) {
+        if (paymentIdRequired) {
+          throw new Error(`${recordName} contains a record without paymentId`);
+        }
+
+        continue;
+      }
+      console.log("paymentIdKey", paymentIdKey);
+
+      if (map.has(paymentIdKey)) {
+        throw new Error(
+          `Duplicate paymentId "${paymentIdKey}" found in ${recordName}`,
+        );
+      }
+
+      map.set(paymentIdKey, record);
+    }
+
+    return map;
+  };
+
+  /*
+   * Create a Map containing only active Receipts or Settlements.
+   *
+   * There must never be more than one active document for the same
+   * company and paymentId.
+   */
+  const createActiveDocumentMap = (records, recordName) => {
+    const map = new Map();
+
+    for (const record of records || []) {
+      const paymentIdKey = getPaymentIdKey(record?.paymentId);
+
+      if (!paymentIdKey) {
+        continue;
+      }
+
+      if (record.isCancelled === true) {
+        continue;
+      }
+
+      if (map.has(paymentIdKey)) {
+        throw new Error(
+          `Multiple active ${recordName} records found for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      map.set(paymentIdKey, record);
+    }
+
+    return map;
+  };
+
+  const abortAndRespond = async (statusCode, message) => {
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+
+    return res.status(statusCode).json({
+      message,
+    });
+  };
+
+  /*
+   * Update one existing Sale payment.
+   *
+   * The payment has already been located through paymentId.
+   */
+  const updateSalePayment = ({ salePayment, incomingPayment, party }) => {
+    const newPaymentType = normalizePaymentType(incomingPayment.sourceType);
+
+    if (!newPaymentType) {
+      throw new Error(
+        `sourceType is required for paymentId ${getPaymentIdKey(
+          incomingPayment.paymentId,
+        )}`,
+      );
+    }
+
+    if (isImmediatePayment(newPaymentType) && !incomingPayment.source) {
+      throw new Error(
+        `Payment source is required for paymentId ${getPaymentIdKey(
+          incomingPayment.paymentId,
+        )}`,
+      );
+    }
+
+    if (isCreditPayment(newPaymentType) && !incomingPayment.source) {
+      throw new Error(
+        `Credit party is required for paymentId ${getPaymentIdKey(
+          incomingPayment.paymentId,
+        )}`,
+      );
+    }
+
+    /*
+     * Preserve the existing behavior:
+     * do not clear source/ref_id when an empty source is sent.
+     */
+    if (incomingPayment.source) {
+      salePayment.ref_id = incomingPayment.source;
+
+      salePayment.source = incomingPayment.source;
+    }
+
+    salePayment.type = newPaymentType;
+    salePayment.sourceType = newPaymentType;
+
+    if (Object.prototype.hasOwnProperty.call(incomingPayment, "subsource")) {
+      salePayment.subsource = incomingPayment.subsource;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(incomingPayment, "remarks")) {
+      salePayment.remarks = incomingPayment.remarks;
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(incomingPayment, "amount") &&
+      incomingPayment.amount !== undefined &&
+      incomingPayment.amount !== null
+    ) {
+      salePayment.amount = incomingPayment.amount;
+    }
+
+    if (isCreditPayment(newPaymentType)) {
+      salePayment.customer = incomingPayment.source;
+      salePayment.customerName =
+        incomingPayment.customerName || party.partyName;
+    } else {
+      salePayment.customer = party._id;
+      salePayment.customerName = party.partyName;
+    }
+  };
+
+  /*
+   * Update an active Receipt during:
+   *
+   * Immediate -> Immediate
+   *
+   * This helper never reactivates a cancelled Receipt.
+   */
+  const updateReceipt = ({ receipt, payment, party, gstNo, address }) => {
+    const paymentType = getPaymentType(payment);
+
+    receipt.party = buildEmbeddedParty(party, {
+      gstNo,
+      address,
+    });
+
+    receipt.markModified("party");
+
+    if (!receipt.paymentDetails) {
+      receipt.paymentDetails = {};
+    }
+
+    if (paymentType === "cash") {
+      receipt.paymentMethod = "Cash";
+
+      receipt.paymentDetails.cash_id =
+        payment.source || receipt.paymentDetails.cash_id;
+
+      receipt.paymentDetails.cash_ledname =
+        payment.subsource || receipt.paymentDetails.cash_ledname;
+
+      receipt.paymentDetails.cash_name =
+        payment.subsource || receipt.paymentDetails.cash_name;
+
+      receipt.paymentDetails.bank_id = null;
+      receipt.paymentDetails.bank_ledname = "";
+      receipt.paymentDetails.bank_name = "";
+    } else {
+      /*
+       * Bank, Card, UPI and Cheque use the bank-side fields.
+       */
+      receipt.paymentMethod = paymentType || receipt.paymentMethod;
+
+      receipt.paymentDetails.bank_id =
+        payment.source || receipt.paymentDetails.bank_id;
+
+      receipt.paymentDetails.bank_ledname =
+        payment.subsource || receipt.paymentDetails.bank_ledname;
+
+      receipt.paymentDetails.bank_name =
+        payment.subsource || receipt.paymentDetails.bank_name;
+
+      receipt.paymentDetails.cash_id = null;
+      receipt.paymentDetails.cash_ledname = "";
+      receipt.paymentDetails.cash_name = "";
+    }
+
+    receipt.paymentId = payment.paymentId;
+
+    if (
+      Object.prototype.hasOwnProperty.call(payment, "amount") &&
+      payment.amount !== undefined &&
+      payment.amount !== null &&
+      Object.prototype.hasOwnProperty.call(receipt, "amount")
+    ) {
+      receipt.amount = payment.amount;
+    }
+
+    receipt.markModified("paymentDetails");
+  };
+
+  /*
+   * Cancel the active Receipt during:
+   *
+   * Immediate -> Credit
+   */
+  const cancelReceipt = ({ receipt, party, gstNo, address }) => {
+    receipt.party = buildEmbeddedParty(party, {
+      gstNo,
+      address,
+    });
+
+    receipt.markModified("party");
+
+    receipt.isCancelled = true;
+    receipt.cancelledAt = new Date();
+    receipt.cancelledBy = req.sUserId;
+    receipt.cancelledByName = req.secUserName;
+
+    /*
+     * The original controller uses cancelReason.
+     *
+     * Keep this field unless your actual schema uses
+     * cancelledReason instead.
+     */
+    receipt.cancelReason = "Payment mode changed to Credit";
+  };
+
+  /*
+   * Update an active Settlement during:
+   *
+   * Immediate -> Immediate
+   */
+  const updateSettlement = ({ settlement, payment, party, receipt }) => {
+    const paymentType = getPaymentType(payment);
+
+    settlement.paymentId = payment.paymentId;
+
+    settlement.partyId = party._id;
+    settlement.partyName = party.partyName;
+
+    settlement.partyType = party.partyType || "party";
+
+    settlement.sourceId = payment.source || settlement.sourceId;
+
+    settlement.sourceType = toSettlementSourceType(paymentType);
+
+    settlement.payment_mode = paymentType || settlement.payment_mode;
+
+    if (receipt?.receiptNumber) {
+      settlement.voucherNumber = receipt.receiptNumber;
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(payment, "amount") &&
+      payment.amount !== undefined &&
+      payment.amount !== null &&
+      Object.prototype.hasOwnProperty.call(settlement, "amount")
+    ) {
+      settlement.amount = payment.amount;
+    }
+  };
+
+  /*
+   * Rebuild a Checkout payment row from the final Sale payment.
+   *
+   * Existing Checkout-only values are preserved using paymentId.
+   * No array index is used.
+   */
+  const buildCheckoutPaymentRow = ({
+    salePayment,
+    existingCheckoutPayment,
+    party,
+  }) => {
+    const existingData = toPlainObject(existingCheckoutPayment);
+
+    const paymentType = getPaymentType(salePayment);
+
+    return {
+      ...existingData,
+
+      /*
+       * Preserve the Checkout subdocument _id through existingData.
+       * Never replace it with payment.source.
+       */
+
+      paymentId: salePayment.paymentId,
+
+      mode: paymentType || existingData.mode,
+
+      type: paymentType || existingData.type,
+
+      sourceType: paymentType || existingData.sourceType,
+
+      source:
+        salePayment.source !== undefined
+          ? salePayment.source
+          : existingData.source,
+
+      ref_id:
+        salePayment.ref_id !== undefined
+          ? salePayment.ref_id
+          : existingData.ref_id,
+
+      subsource:
+        salePayment.subsource !== undefined
+          ? salePayment.subsource
+          : existingData.subsource,
+
+      remarks:
+        salePayment.remarks !== undefined
+          ? salePayment.remarks
+          : existingData.remarks,
+
+      amount:
+        salePayment.amount !== undefined
+          ? salePayment.amount
+          : existingData.amount,
+
+      customer: party._id,
+      customerName: party.partyName,
+    };
+  };
+
+  const calculatePaymentTotals = (salePayments) => {
+    const totals = {
+      cash: 0,
+      bank: 0,
+      upi: 0,
+      credit: 0,
+      card: 0,
+    };
+
+    for (const payment of salePayments || []) {
+      const paymentType = getPaymentType(payment);
+
+      const parsedAmount = Number.parseFloat(payment.amount?.toString() || "0");
+
+      const amount = Number.isFinite(parsedAmount) ? parsedAmount : 0;
+
+      if (paymentType === "cash") {
+        totals.cash += amount;
+      } else if (paymentType === "bank" || paymentType === "cheque") {
+        /*
+         * The current totals object has no separate cheque field.
+         */
+        totals.bank += amount;
+      } else if (paymentType === "upi") {
+        totals.upi += amount;
+      } else if (paymentType === "credit") {
+        totals.credit += amount;
+      } else if (paymentType === "card") {
+        totals.card += amount;
+      }
+    }
+
+    return totals;
+  };
+
+  const getHotelSeries = async (voucherType) => {
+    const voucher = await VoucherSeriesModel.findOne({
+      cmp_id: requestCmpId,
+      voucherType,
+    }).session(session);
+
+    if (!voucher) {
+      throw new Error(`${voucherType} voucher series not found`);
+    }
+
+    const series = voucher.series.find((item) => item.under === "hotel");
+
+    if (!series) {
+      throw new Error(`No hotel ${voucherType} voucher series found`);
+    }
+
+    return series;
+  };
+
+  const buildReceiptPaymentDetails = (payment) => {
+    const paymentType = getPaymentType(payment);
+
+    if (paymentType === "cash") {
+      return {
+        cash_ledname: payment.subsource || "",
+        cash_name: payment.subsource || "",
+        cash_id: payment.source || null,
+        bank_ledname: "",
+        bank_name: "",
+        bank_id: null,
+        chequeNumber: "",
+        chequeDate: null,
+      };
+    }
+
+    return {
+      cash_ledname: "",
+      cash_name: "",
+      cash_id: null,
+      bank_ledname: payment.subsource || "",
+      bank_name: payment.subsource || "",
+      bank_id: payment.source || null,
+      chequeNumber: "",
+      chequeDate: null,
+    };
+  };
+
+  const updateTallyForCheckoutTransition = async ({
+    transition,
+    tally,
+    newPayment,
+    receipt,
+    party,
+  }) => {
+    if (!tally) {
+      throw new Error(
+        `Tally record not found for paymentId ${getPaymentIdKey(
+          newPayment?.paymentId,
+        )}`,
+      );
+    }
+
+    const amount = Number(newPayment?.amount || 0);
+
+    const newPaymentType = getPaymentType(newPayment);
+    const tallyPartyId =
+      isCreditPayment(newPaymentType) && newPayment?.source
+        ? newPayment.source
+        : party._id;
+    const tallyPartyName =
+      isCreditPayment(newPaymentType) && newPayment?.customerName
+        ? newPayment.customerName
+        : party.partyName;
+
+    tally.party_id = tallyPartyId;
+    tally.party_name = tallyPartyName;
+    tally.mobile_no = party.mobileNumber || tally.mobile_no;
+
+    if (transition === "immediate-to-credit") {
+      tally.bill_pending_amt = amount;
+      tally.appliedReceipts = [];
+    } else if (transition === "credit-to-immediate") {
+      tally.bill_pending_amt = 0;
+      if (receipt) {
+        tally.appliedReceipts = [
+          {
+            _id: receipt._id,
+            receiptNumber: receipt.receiptNumber,
+            settledAmount: amount,
+            date: receipt.date || new Date(),
+          },
+        ];
+      }
+    } else if (transition === "immediate-to-immediate") {
+      tally.bill_pending_amt = 0;
+      if (receipt) {
+        tally.appliedReceipts = [
+          {
+            _id: receipt._id,
+            receiptNumber: receipt.receiptNumber,
+            settledAmount: amount,
+            date: receipt.date || new Date(),
+          },
+        ];
+      }
+    } else if (transition === "credit-to-credit") {
+      tally.bill_pending_amt = amount;
+      tally.appliedReceipts = [];
+    }
+
+    tally.markModified("appliedReceipts");
+    return await tally.save({ session });
+  };
+
+  const createReceiptAndSettlementForPayment = async ({
+    payment,
+    tally,
+    party,
+    sale,
+    gstNo,
+    address,
+  }) => {
+    if (!payment?.source) {
+      throw new Error(
+        `Payment source is required for paymentId ${getPaymentIdKey(
+          payment?.paymentId,
+        )}`,
+      );
+    }
+
+    if (!tally) {
+      throw new Error(
+        `Tally record not found for paymentId ${getPaymentIdKey(
+          payment?.paymentId,
+        )}`,
+      );
+    }
+
+    const paymentType = getPaymentType(payment);
+    const amount = Number(payment.amount || 0);
+    const currentPending = Number(tally.bill_pending_amt || amount);
+    const receiptSeries = await getHotelSeries("receipt");
+    const receiptNumber = await generateVoucherNumber(
+      requestCmpId,
+      "receipt",
+      receiptSeries._id.toString(),
+      session,
+    );
+
+    const receipt = new ReceiptModel({
+      date: new Date(),
+      voucherType: "receipt",
+      receiptNumber: receiptNumber.voucherNumber,
+      series_id: receiptSeries._id,
+      usedSeriesNumber: receiptNumber.usedSeriesNumber,
+      serialNumber: receiptNumber.usedSeriesNumber,
+      Primary_user_id: req.pUserId || req.owner,
+      Secondary_user_id: req.sUserId,
+      cmp_id: requestCmpId,
+      party: buildEmbeddedParty(party, { gstNo, address }),
+      billData: [
+        {
+          _id: tally._id,
+          bill_no: sale.salesNumber,
+          billId: sale._id.toString(),
+          bill_date: tally.bill_date || new Date(),
+          bill_pending_amt: currentPending,
+          source: "sales",
+          settledAmount: amount,
+          remainingAmount: 0,
+        },
+      ],
+      totalBillAmount: currentPending,
+      enteredAmount: amount,
+      advanceAmount: 0,
+      remainingAmount: 0,
+      paymentMethod: paymentType === "cash" ? "Cash" : paymentType,
+      paymentDetails: buildReceiptPaymentDetails(payment),
+      note: "",
+      isCancelled: false,
+      paymentId: payment.paymentId,
+    });
+
+    await receipt.save({ session });
+
+    const [settlement] = await settlementModel.create(
+      [
+        {
+          voucherNumber: receipt.receiptNumber,
+          voucherId: receipt._id,
+          voucherModel: "Receipt",
+          voucherType: "receipt",
+          amount,
+          payment_mode: paymentType,
+          paymentId: payment.paymentId,
+          partyId: party._id,
+          partyName: party.partyName,
+          partyType: party.partyType || "party",
+          sourceId: payment.source,
+          sourceType: toSettlementSourceType(paymentType),
+          cmp_id: requestCmpId,
+          Primary_user_id: req.pUserId || req.owner,
+          settlement_date: new Date(),
+          voucher_date: new Date(),
+        },
+      ],
+      { session },
+    );
+
+    tally.bill_pending_amt = 0;
+    tally.appliedReceipts = [
+      {
+        _id: receipt._id,
+        receiptNumber: receipt.receiptNumber,
+        settledAmount: amount,
+        date: receipt.date || new Date(),
+      },
+    ];
+    tally.markModified("appliedReceipts");
+    await tally.save({ session });
+
+    return { receipt, settlement };
+  };
 
   try {
     session.startTransaction();
@@ -7271,254 +8216,651 @@ export const updateCheckout = async (req, res) => {
     const { cmp_id } = req.query;
 
     if (!id || !cmp_id) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "id and cmp_id are required" });
+      return await abortAndRespond(400, "id and cmp_id are required");
     }
 
-    const sale = await salesModel.findOne({ _id: id, cmp_id }).session(session);
+    const sale = await salesModel
+      .findOne({
+        _id: id,
+        cmp_id,
+      })
+      .session(session);
 
     if (!sale) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ message: "Sale not found" });
+      return await abortAndRespond(404, "Sale not found");
     }
 
     const { partyId, gstNo, address, payments = [] } = req.body;
 
     if (!partyId) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(400).json({ message: "partyId is required" });
+      return await abortAndRespond(400, "partyId is required");
     }
 
-    const party = await Party.findOne({ _id: partyId, cmp_id }).session(
-      session,
-    );
-
-    if (!party) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(404).json({ message: "Party not found" });
-    }
-
-    // ── Helper: map sourceType to settlement sourceType enum ──
-    // cash → "cash", everything else (bank/upi/card) → "bank"
-    const toSourceType = (sourceType) => {
-      return sourceType?.toLowerCase() === "cash" ? "cash" : "bank";
-    };
-
-    // ── Update sale party ──
-    sale.party = buildEmbeddedParty(party, { gstNo, address });
-    sale.markModified("party");
-
-    // ── Update payment splits by index ──
-    payments.forEach((payment, index) => {
-      const matchingPayment = sale.paymentSplittingData[index];
-      if (!matchingPayment) return;
-
-      matchingPayment.ref_id = payment.source || matchingPayment.ref_id;
-      matchingPayment.source = payment.source || matchingPayment.source;
-      matchingPayment.type =
-        payment.sourceType?.toLowerCase() || matchingPayment.type;
-      matchingPayment.sourceType =
-        payment.sourceType?.toLowerCase() || matchingPayment.sourceType;
-      matchingPayment.subsource =
-        payment.subsource || matchingPayment.subsource;
-      matchingPayment.remarks = payment.remarks ?? matchingPayment.remarks;
-      matchingPayment.customer = party._id;
-      matchingPayment.customerName = party.partyName;
-    });
-
-    sale.markModified("paymentSplittingData");
-    await sale.save({ session });
-
-    // ── Fetch all receipts linked to this sale ──
-    const receipts = await ReceiptModel.find({
+    const party = await Party.findOne({
+      _id: partyId,
       cmp_id,
-      "billData.bill_no": sale.salesNumber,
     }).session(session);
 
-    if (receipts.length > 0) {
-      await Promise.all(
-        receipts.map(async (receipt, index) => {
-          // 1. Update party
-          receipt.party = buildEmbeddedParty(party, { gstNo, address });
-          receipt.markModified("party");
-
-          // 2. Match by index
-          const matchedPayment = sale.paymentSplittingData[index] || null;
-
-          if (matchedPayment) {
-            const isCash = matchedPayment.sourceType?.toLowerCase() === "cash";
-
-            if (isCash) {
-              receipt.paymentMethod = "Cash";
-              receipt.paymentDetails.cash_id =
-                matchedPayment.source || receipt.paymentDetails.cash_id;
-              receipt.paymentDetails.cash_ledname =
-                matchedPayment.subsource || receipt.paymentDetails.cash_ledname;
-              receipt.paymentDetails.cash_name =
-                matchedPayment.subsource || receipt.paymentDetails.cash_name;
-              receipt.paymentDetails.bank_id = null;
-              receipt.paymentDetails.bank_ledname = "";
-              receipt.paymentDetails.bank_name = "";
-            } else {
-              receipt.paymentMethod =
-                matchedPayment.sourceType || receipt.paymentMethod;
-              receipt.paymentDetails.bank_id =
-                matchedPayment.source || receipt.paymentDetails.bank_id;
-              receipt.paymentDetails.bank_ledname =
-                matchedPayment.subsource || receipt.paymentDetails.bank_ledname;
-              receipt.paymentDetails.bank_name =
-                matchedPayment.subsource || receipt.paymentDetails.bank_name;
-              receipt.paymentDetails.cash_id = null;
-              receipt.paymentDetails.cash_ledname = "";
-              receipt.paymentDetails.cash_name = "";
-            }
-
-            receipt.markModified("paymentDetails");
-          }
-
-          await receipt.save({ session });
-        }),
-      );
+    if (!party) {
+      return await abortAndRespond(404, "Party not found");
     }
 
-    // ── Update Checkout ──
+    /*
+     * ======================================================
+     * 1. Clone old Sale payments before modifying the Sale.
+     * ======================================================
+     */
+    const oldPayments = (sale.paymentSplittingData || []).map((payment) => ({
+      ...payment.toObject(),
+      paymentId: payment.paymentId,
+    }));
+    console.log("oldPayments", oldPayments);
+
+    const oldPaymentMap = createStrictPaymentMap(
+      oldPayments,
+      "old Sale paymentSplittingData",
+      {
+        paymentIdRequired: true,
+      },
+    );
+
+    /*`
+     * ======================================================
+     * 2. Update Sale payments using paymentId.
+     * ======================================================
+     */
+    const salePaymentMap = createStrictPaymentMap(
+      sale.paymentSplittingData || [],
+      "Sale paymentSplittingData",
+      {
+        paymentIdRequired: true,
+      },
+    );
+
+    const incomingPaymentMap = createStrictPaymentMap(
+      payments,
+      "request payments",
+      {
+        paymentIdRequired: true,
+      },
+    );
+
+    for (const [paymentIdKey, incomingPayment] of incomingPaymentMap) {
+      const salePayment = salePaymentMap.get(paymentIdKey);
+
+      /*
+       * Preserve existing behavior:
+       * ignore a request payment that does not belong to this Sale.
+       */
+      if (!salePayment) {
+        continue;
+      }
+
+      updateSalePayment({
+        salePayment,
+        incomingPayment,
+        party,
+      });
+    }
+
+    sale.party = buildEmbeddedParty(party, {
+      gstNo,
+      address,
+    });
+
+    sale.markModified("party");
+    sale.markModified("paymentSplittingData");
+
+    await sale.save({ session });
+
+    const finalPaymentMap = createStrictPaymentMap(
+      sale.paymentSplittingData || [],
+      "updated Sale paymentSplittingData",
+      {
+        paymentIdRequired: true,
+      },
+    );
+
+    const paymentIds = sale.paymentSplittingData.map(
+      (payment) => payment.paymentId,
+    );
+
+    /*
+     * ======================================================
+     * 3. Load Checkout.
+     * ======================================================
+     */
     const checkout = await CheckOut.findOne({
       cmp_id,
       voucherNumber: sale.salesNumber,
     }).session(session);
 
     if (!checkout) {
-      await session.abortTransaction();
-      session.endSession();
-      return res
-        .status(404)
-        .json({ message: "Checkout not found for this sale" });
+      return await abortAndRespond(404, "Checkout not found for this sale");
     }
 
-    payments.forEach((payment, index) => {
-      const matchingPayment = checkout.checkoutpaymenttypedetails[index];
-      if (!matchingPayment) return;
+    const checkoutMap = createStrictPaymentMap(
+      checkout.checkoutpaymenttypedetails || [],
+      "Checkout checkoutpaymenttypedetails",
+    );
 
-      matchingPayment.mode =
-        payment.sourceType?.toLowerCase() || matchingPayment.mode;
-      matchingPayment._id = payment.source || matchingPayment._id;
-      matchingPayment.customerName =
-        party.partyName || matchingPayment.customerName;
-    });
+    /*
+     * ======================================================
+     * 4. Fetch active Receipts using paymentId.
+     *
+     * Cancelled Receipt history is intentionally excluded.
+     * ======================================================
+     */
+    const activeReceipts = await ReceiptModel.find({
+      cmp_id,
 
-    checkout.markModified("checkoutpaymenttypedetails");
+      paymentId: {
+        $in: paymentIds,
+      },
 
-    // ── Payment totals for checkout ──
-    const paymentTotals = { cash: 0, bank: 0, upi: 0, credit: 0, card: 0 };
+      isCancelled: {
+        $ne: true,
+      },
+    }).session(session);
 
-    sale.paymentSplittingData.forEach((p) => {
-      const type = p.sourceType?.toLowerCase() || p.type?.toLowerCase();
-      const amount = parseFloat(p.amount?.toString() || "0");
-      if (type === "cash") paymentTotals.cash += amount;
-      else if (type === "bank") paymentTotals.bank += amount;
-      else if (type === "upi") paymentTotals.upi += amount;
-      else if (type === "credit") paymentTotals.credit += amount;
-      else if (type === "card") paymentTotals.card += amount;
-    });
+    const activeReceiptMap = createActiveDocumentMap(activeReceipts, "Receipt");
 
-    checkout.paymenttypeDetails = paymentTotals;
-    checkout.markModified("paymenttypeDetails");
-
-    /// update guest info of checkout accriding to party
-
-    checkout.guestId = party._id || checkout.guestId;
-    checkout.guestName = party.partyName || checkout.guestName;
-    // checkout.guestCountry=party._id;
-    checkout.guestState =
-      statesData.find((el) => el?.stateCode === party?.state_reference) ||
-      checkout.guestState;
-    checkout.guestPinCode = party.guestPinCode || checkout.guestPinCode;
-    checkout.guestDetailedAddress = address || checkout.guestDetailedAddress;
-    checkout.guestMobileNumber =
-      party.mobileNumber || checkout.guestMobileNumber;
-    checkout.gstNo = gstNo || checkout.gstNo;
-
-    await checkout.save({ session });
-
-    // ── Update Settlements ──
-    // Fetch all settlements for receipt voucher numbers
-
-    const receiptVoucherNumbers = receipts
-      .map((r) => r.receiptNumber)
-      .filter(Boolean);
-
-    const settlements = await settlementModel
+    /*
+     * ======================================================
+     * 5. Fetch active Settlements using paymentId.
+     *
+     * Cancelled Settlement history is intentionally excluded.
+     * ======================================================
+     */
+    const activeSettlements = await settlementModel
       .find({
         cmp_id,
-        voucherNumber: { $in: receiptVoucherNumbers },
+
+        paymentId: {
+          $in: paymentIds,
+        },
+
+        isCancelled: {
+          $ne: true,
+        },
       })
       .session(session);
 
-    // console.log("receipts", receipts);
-    // console.log("receiptVoucherNumbers", receiptVoucherNumbers);
-    // console.log("settlements", settlements);
+    const activeSettlementMap = createActiveDocumentMap(
+      activeSettlements,
+      "Settlement",
+    );
 
-    if (settlements.length > 0) {
-      await Promise.all(
-        settlements.map(async (settlement, index) => {
-          const matchedPayment = sale.paymentSplittingData[index] || null;
+    /*
+     * ======================================================
+     * 6. Fetch Tally records using paymentId.
+     *
+     * Replace hotelTallyModel with the actual imported model name.
+     * ======================================================
+     */
+    const tallyRecords = await TallyData.find({
+      cmp_id,
 
-          // Always update party info
-          settlement.partyId = party._id;
-          settlement.partyName = party.partyName;
-          settlement.partyType = party.partyType || "party"; // from Party document
+      paymentId: {
+        $in: paymentIds,
+      },
+    }).session(session);
 
-          if (matchedPayment) {
-            const rawType = matchedPayment.sourceType?.toLowerCase();
+    const tallyMap = createStrictPaymentMap(tallyRecords, "Tally records");
 
-            settlement.sourceId = matchedPayment.source || settlement.sourceId;
-            settlement.sourceType = toSourceType(rawType); // "cash" | "bank"
-            settlement.payment_mode = rawType || settlement.payment_mode; // "cash" | "bank" | "upi" | "card"
-          }
+    /*
+     * Create a brand-new Receipt and Settlement for:
+     *
+     * Credit -> Immediate
+     *
+     * Cancelled Receipt/Settlement records are never reused.
+     */
+    const createFreshReceiptAndSettlement = async ({ payment, tally }) => {
+      const paymentIdKey = getPaymentIdKey(payment.paymentId);
 
-          await settlement.save({ session });
-        }),
+      const { receipt: createdReceipt, settlement: createdSettlement } =
+        await createReceiptAndSettlementForPayment({
+          payment,
+          tally,
+          party,
+          sale,
+          gstNo,
+          address,
+        });
+
+      const refreshedTally = await TallyData.findOne({
+        cmp_id,
+
+        paymentId: payment.paymentId,
+      }).session(session);
+
+      if (!createdReceipt) {
+        throw new Error(
+          `Fresh Receipt was not created for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      if (!createdSettlement) {
+        throw new Error(
+          `Fresh Settlement was not created for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      if (getPaymentIdKey(createdReceipt.paymentId) !== paymentIdKey) {
+        throw new Error(
+          `Created Receipt has an incorrect paymentId for payment ${paymentIdKey}`,
+        );
+      }
+
+      if (getPaymentIdKey(createdSettlement.paymentId) !== paymentIdKey) {
+        throw new Error(
+          `Created Settlement has an incorrect paymentId for payment ${paymentIdKey}`,
+        );
+      }
+
+      return {
+        receipt: createdReceipt,
+        settlement: createdSettlement,
+        tally: refreshedTally,
+      };
+    };
+
+    /*
+     * ======================================================
+     * 7. Process all transitions using paymentId.
+     * ======================================================
+     *
+     * Writes are sequential because concurrent operations using one
+     * transaction session should not be executed through Promise.all().
+     */
+    for (const newPayment of sale.paymentSplittingData) {
+      const paymentIdKey = getPaymentIdKey(newPayment.paymentId);
+
+      if (!paymentIdKey) {
+        throw new Error("Updated Sale payment is missing paymentId");
+      }
+
+      const oldPayment = oldPaymentMap.get(paymentIdKey);
+
+      if (!oldPayment) {
+        throw new Error(
+          `Old Sale payment was not found for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      let receipt = activeReceiptMap.get(paymentIdKey);
+
+      let settlement = activeSettlementMap.get(paymentIdKey);
+
+      let tally = tallyMap.get(paymentIdKey);
+
+      const oldPaymentType = getPaymentType(oldPayment);
+
+      const newPaymentType = getPaymentType(newPayment);
+
+      if (!oldPaymentType) {
+        throw new Error(
+          `Old payment mode is missing for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      if (!newPaymentType) {
+        throw new Error(
+          `New payment mode is missing for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      const oldIsCredit = isCreditPayment(oldPaymentType);
+
+      const oldIsImmediate = isImmediatePayment(oldPaymentType);
+
+      const newIsCredit = isCreditPayment(newPaymentType);
+
+      const newIsImmediate = isImmediatePayment(newPaymentType);
+
+      if (!oldIsCredit && !oldIsImmediate) {
+        throw new Error(
+          `Unsupported old payment mode "${oldPaymentType}" for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      if (!newIsCredit && !newIsImmediate) {
+        throw new Error(
+          `Unsupported new payment mode "${newPaymentType}" for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      /*
+       * ------------------------------------------------------
+       * CASE 1: Credit -> Credit
+       * ------------------------------------------------------
+       */
+      if (oldIsCredit && newIsCredit) {
+        /*
+         * Credit must not have an active Receipt or Settlement.
+         *
+         * Do not silently cancel unexpected records because that would
+         * hide historical data corruption.
+         */
+        if (receipt) {
+          throw new Error(
+            `Active Receipt unexpectedly exists for Credit paymentId ${paymentIdKey}`,
+          );
+        }
+
+        if (settlement) {
+          throw new Error(
+            `Active Settlement unexpectedly exists for Credit paymentId ${paymentIdKey}`,
+          );
+        }
+
+        /*
+         * Existing Tally helper responsibilities:
+         *
+         * - update party/customer details
+         * - update ledger information
+         * - keep the outstanding pending
+         * - use paymentId to find the correct Tally entry
+         */
+        tally = await updateTallyForCheckoutTransition({
+          transition: "credit-to-credit",
+
+          tally,
+          oldPayment,
+          newPayment,
+
+          receipt: null,
+          settlement: null,
+
+          sale,
+          checkout,
+          party,
+          cmp_id,
+          session,
+
+          requestUserId: req.sUserId,
+
+          requestUserName: req.secUserName,
+        });
+
+        if (tally) {
+          tallyMap.set(paymentIdKey, tally);
+        }
+
+        continue;
+      }
+
+      /*
+       * ------------------------------------------------------
+       * CASE 2: Immediate -> Immediate
+       * ------------------------------------------------------
+       */
+      if (oldIsImmediate && newIsImmediate) {
+        /*
+         * Never recreate documents in this transition.
+         */
+        if (!receipt) {
+          throw new Error(
+            `Active Receipt not found for immediate paymentId ${paymentIdKey}`,
+          );
+        }
+
+        if (!settlement) {
+          throw new Error(
+            `Active Settlement not found for immediate paymentId ${paymentIdKey}`,
+          );
+        }
+
+        updateReceipt({
+          receipt,
+          payment: newPayment,
+          party,
+          gstNo,
+          address,
+        });
+
+        await receipt.save({
+          session,
+        });
+
+        updateSettlement({
+          settlement,
+          payment: newPayment,
+          party,
+          receipt,
+        });
+
+        await settlement.save({
+          session,
+        });
+
+        /*
+         * Existing Tally helper responsibilities:
+         *
+         * - find the Tally entry using paymentId
+         * - update the exact payment source/mode
+         * - update the applied Receipt information
+         * - adjust applied amount if the payment amount changed
+         * - do not create or cancel Tally entries
+         */
+        tally = await updateTallyForCheckoutTransition({
+          transition: "immediate-to-immediate",
+
+          tally,
+          oldPayment,
+          newPayment,
+          receipt,
+          settlement,
+
+          sale,
+          checkout,
+          party,
+          cmp_id,
+          session,
+
+          requestUserId: req.sUserId,
+
+          requestUserName: req.secUserName,
+        });
+
+        if (tally) {
+          tallyMap.set(paymentIdKey, tally);
+        }
+
+        continue;
+      }
+
+      /*
+       * ------------------------------------------------------
+       * CASE 3: Immediate -> Credit
+       * ------------------------------------------------------
+       */
+      if (oldIsImmediate && newIsCredit) {
+        if (!receipt) {
+          throw new Error(
+            `Active Receipt not found for immediate paymentId ${paymentIdKey}`,
+          );
+        }
+
+        if (!settlement) {
+          throw new Error(
+            `Active Settlement not found for immediate paymentId ${paymentIdKey}`,
+          );
+        }
+
+        cancelReceipt({
+          receipt,
+          party,
+          gstNo,
+          address,
+        });
+
+        await receipt.save({
+          session,
+        });
+
+        await settlementModel.deleteOne({ _id: settlement._id }, { session });
+
+        /*
+         * Existing Tally helper responsibilities:
+         *
+         * - remove the Receipt application using paymentId
+         * - restore the outstanding amount
+         * - increase bill_pending_amt by the previously applied amount
+         * - mark the outstanding as pending
+         * - update party/customer details
+         */
+        tally = await updateTallyForCheckoutTransition({
+          transition: "immediate-to-credit",
+
+          tally,
+          oldPayment,
+          newPayment,
+          receipt,
+          settlement,
+
+          sale,
+          checkout,
+          party,
+          cmp_id,
+          session,
+
+          requestUserId: req.sUserId,
+
+          requestUserName: req.secUserName,
+        });
+
+        /*
+         * The cancelled documents are no longer active.
+         */
+        activeReceiptMap.delete(paymentIdKey);
+
+        activeSettlementMap.delete(paymentIdKey);
+
+        if (tally) {
+          tallyMap.set(paymentIdKey, tally);
+        }
+
+        continue;
+      }
+
+      /*
+       * ------------------------------------------------------
+       * CASE 4: Credit -> Immediate
+       * ------------------------------------------------------
+       */
+      if (oldIsCredit && newIsImmediate) {
+        /*
+         * A Credit payment must not already have active payment
+         * documents.
+         *
+         * Cancelled historical documents are allowed and are ignored.
+         */
+        if (receipt) {
+          throw new Error(
+            `Active Receipt already exists for Credit paymentId ${paymentIdKey}`,
+          );
+        }
+
+        if (settlement) {
+          throw new Error(
+            `Active Settlement already exists for Credit paymentId ${paymentIdKey}`,
+          );
+        }
+
+        /*
+         * This helper must:
+         *
+         * - reduce outstanding
+         * - update bill_pending_amt
+         * - create a fresh Receipt number
+         * - create a new Receipt
+         * - create a new Settlement
+         * - set Receipt.paymentId
+         * - set Settlement.paymentId
+         * - update Tally.appliedReceipts
+         *
+         * Everything receives the current MongoDB session.
+         */
+        const createdDocuments = await createFreshReceiptAndSettlement({
+          payment: newPayment,
+          tally,
+        });
+
+        receipt = createdDocuments.receipt;
+
+        settlement = createdDocuments.settlement;
+
+        tally = createdDocuments.tally;
+
+        activeReceiptMap.set(paymentIdKey, receipt);
+
+        activeSettlementMap.set(paymentIdKey, settlement);
+
+        if (tally) {
+          tallyMap.set(paymentIdKey, tally);
+        }
+
+        continue;
+      }
+
+      throw new Error(
+        `Unable to determine transition for paymentId ${paymentIdKey}`,
       );
     }
 
-    // console.log("sale party", sale.party); /* */
-    // console.log("sale paymentSplittingData", sale.paymentSplittingData); /* */
-    // console.log("receipts party", receipts.party);
-    // console.log(
-    //   "receipts party",
-    //   receipts.map((r) => r.party),
-    // );
-    // console.log(
-    //   "receipts paymentDetails",
-    //   receipts.map((r) => r.paymentDetails),
-    // );
-    // console.log(
-    //   "checkout checkoutpaymenttypedetails",
-    //   checkout.checkoutpaymenttypedetails,
-    // );
+    /*
+     * ======================================================
+     * 8. Completely rebuild Checkout payments from Sale.
+     * ======================================================
+     *
+     * The old Checkout Map is used only to preserve Checkout-specific
+     * fields and subdocument IDs.
+     */
+    checkout.checkoutpaymenttypedetails = sale.paymentSplittingData.map(
+      (salePayment) => {
+        const paymentIdKey = getPaymentIdKey(salePayment.paymentId);
 
-    // /log settlements
-    console.log(
-      "settlements after update",
-      settlements.map((s) => ({
-        partyId: s.partyId,
-        partyName: s.partyName,
-        partyType: s.partyType,
-        sourceId: s.sourceId,
-        sourceType: s.sourceType,
-        payment_mode: s.payment_mode,
-      })),
+        const existingCheckoutPayment = checkoutMap.get(paymentIdKey);
+
+        return buildCheckoutPaymentRow({
+          salePayment,
+          existingCheckoutPayment,
+          party,
+        });
+      },
     );
 
-    // ── Commit ──
-    await session.commitTransaction();
-    session.endSession();
+    checkout.markModified("checkoutpaymenttypedetails");
 
-    // console.log("receipt",rece);
+    checkout.paymenttypeDetails = calculatePaymentTotals(
+      sale.paymentSplittingData,
+    );
+
+    checkout.markModified("paymenttypeDetails");
+
+    checkout.guestId = party._id || checkout.guestId;
+
+    checkout.guestName = party.partyName || checkout.guestName;
+
+    checkout.guestState =
+      statesData.find((state) => state?.stateCode === party?.state_reference) ||
+      checkout.guestState;
+
+    checkout.guestPinCode = party.guestPinCode || checkout.guestPinCode;
+
+    checkout.guestDetailedAddress = address || checkout.guestDetailedAddress;
+
+    checkout.guestMobileNumber =
+      party.mobileNumber || checkout.guestMobileNumber;
+
+    checkout.gstNo = gstNo || checkout.gstNo;
+
+    await checkout.save({
+      session,
+    });
+
+    await session.commitTransaction();
 
     return res.status(200).json({
       success: true,
@@ -7526,17 +8868,29 @@ export const updateCheckout = async (req, res) => {
       data: sale,
     });
   } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
 
     console.error("updateCheckout error:", error);
-    return res.status(500).json({
-      message: "Server error",
+
+    const isValidationOrIntegrityError =
+      error.message?.includes("paymentId") ||
+      error.message?.includes("payment mode") ||
+      error.message?.includes("sourceType") ||
+      error.message?.includes("Duplicate") ||
+      error.message?.includes("Multiple active") ||
+      error.message?.includes("Unsupported");
+
+    return res.status(isValidationOrIntegrityError ? 400 : 500).json({
+      message: isValidationOrIntegrityError ? error.message : "Server error",
+
       error: error.message,
     });
+  } finally {
+    await session.endSession();
   }
 };
-
 export const getSalesByCheckInNumber = async (req, res) => {
   try {
     const { cmp_id, checkInNumber } = req.query;
@@ -7577,6 +8931,447 @@ export const getSalesByCheckInNumber = async (req, res) => {
 
 export const updateRestaurantSalePayments = async (req, res) => {
   const session = await mongoose.startSession();
+
+  const getPaymentIdKey = (paymentId) => {
+    if (paymentId === undefined || paymentId === null) return null;
+    return paymentId.toString();
+  };
+
+  const toPlainObject = (value) => {
+    if (!value) return {};
+    if (typeof value.toObject === "function") {
+      return value.toObject({
+        depopulate: true,
+        virtuals: false,
+        getters: false,
+      });
+    }
+    return { ...value };
+  };
+
+  const normalizePaymentType = (sourceType) =>
+    typeof sourceType === "string" ? sourceType.trim().toLowerCase() : "";
+
+  const getPaymentType = (payment) =>
+    normalizePaymentType(payment?.sourceType || payment?.type);
+
+  const isCreditPayment = (paymentType) =>
+    normalizePaymentType(paymentType) === "credit";
+
+  const isImmediatePayment = (paymentType) =>
+    ["cash", "bank", "upi", "card", "cheque"].includes(
+      normalizePaymentType(paymentType),
+    );
+
+  const toSettlementSourceType = (paymentType) =>
+    normalizePaymentType(paymentType) === "cash" ? "cash" : "bank";
+
+  const buildReceiptParty = (party) => {
+    const plainParty = toPlainObject(party);
+    const accountGroup =
+      plainParty.accountGroup_id ||
+      plainParty.accountGroup?._id ||
+      plainParty.accountGroup ||
+      null;
+
+    return {
+      _id: plainParty._id,
+      partyName: plainParty.partyName || "",
+      partyType: plainParty.partyType || "party",
+      accountGroupName:
+        plainParty.accountGroupName ||
+        plainParty.accountGroup?.accountGroup ||
+        "",
+      accountGroup_id: accountGroup,
+      subGroupName: plainParty.subGroupName || "",
+      subGroup_id: plainParty.subGroup_id || null,
+      mobileNumber: plainParty.mobileNumber || "",
+      country: plainParty.country || "",
+      state: plainParty.state || "",
+      pin: plainParty.pin || "",
+      emailID: plainParty.emailID || "",
+      gstNo: plainParty.gstNo || "",
+      billingAddress: plainParty.billingAddress || "",
+      shippingAddress: plainParty.shippingAddress || "",
+      accountGroup:
+        plainParty.accountGroup?.accountGroup ||
+        plainParty.accountGroupName ||
+        plainParty.accountGroup?.toString?.() ||
+        "",
+      party_master_id:
+        plainParty.party_master_id || plainParty._id?.toString?.() || "",
+      newAddress: plainParty.newAddress || {},
+    };
+  };
+
+  const buildReceiptPaymentDetails = (payment) => {
+    const paymentType = getPaymentType(payment);
+
+    if (paymentType === "cash") {
+      return {
+        cash_ledname: payment.subsource || "",
+        cash_name: payment.subsource || "",
+        cash_id: payment.source || null,
+        bank_ledname: "",
+        bank_name: "",
+        bank_id: null,
+        chequeNumber: "",
+        chequeDate: null,
+      };
+    }
+
+    return {
+      cash_ledname: "",
+      cash_name: "",
+      cash_id: null,
+      bank_ledname: payment.subsource || "",
+      bank_name: payment.subsource || "",
+      bank_id: payment.source || null,
+      chequeNumber: "",
+      chequeDate: null,
+    };
+  };
+
+  const createActiveDocumentMap = (records, recordName) => {
+    const map = new Map();
+
+    for (const record of records || []) {
+      if (record.isCancelled === true) continue;
+
+      const paymentIdKey = getPaymentIdKey(record?.paymentId);
+      if (!paymentIdKey) continue;
+
+      if (map.has(paymentIdKey)) {
+        throw new Error(
+          `Multiple active ${recordName} records found for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      map.set(paymentIdKey, record);
+    }
+
+    return map;
+  };
+
+  const createStrictPaymentMap = (records, recordName) => {
+    const map = new Map();
+
+    for (const record of records || []) {
+      const paymentIdKey = getPaymentIdKey(record?.paymentId);
+      if (!paymentIdKey) {
+        throw new Error(`${recordName} contains a record without paymentId`);
+      }
+
+      if (map.has(paymentIdKey)) {
+        throw new Error(
+          `Duplicate paymentId "${paymentIdKey}" found in ${recordName}`,
+        );
+      }
+
+      map.set(paymentIdKey, record);
+    }
+
+    return map;
+  };
+
+  const getRestaurantReceiptSeries = async (cmp_id) => {
+    const voucher = await VoucherSeriesModel.findOne({
+      cmp_id,
+      voucherType: "receipt",
+    }).session(session);
+
+    if (!voucher) throw new Error("Receipt voucher series not found");
+
+    const series = voucher.series?.find((item) => item.under === "restaurant");
+    if (!series) throw new Error("Restaurant receipt series not found");
+
+    return series;
+  };
+
+  const validateIncomingPayment = (payment) => {
+    const paymentType = getPaymentType(payment);
+    const paymentIdKey = getPaymentIdKey(payment?.paymentId);
+
+    if (!paymentType) {
+      throw new Error(`sourceType is required for paymentId ${paymentIdKey}`);
+    }
+
+    if (isImmediatePayment(paymentType) && !payment.source) {
+      throw new Error(
+        `Payment source is required for paymentId ${paymentIdKey}`,
+      );
+    }
+
+    if (isCreditPayment(paymentType) && !payment.source) {
+      throw new Error(`Credit party is required for paymentId ${paymentIdKey}`);
+    }
+  };
+
+  const updateSalePayment = ({ salePayment, incomingPayment, saleParty }) => {
+    validateIncomingPayment(incomingPayment);
+
+    const paymentType = getPaymentType(incomingPayment);
+
+    salePayment.ref_id = incomingPayment.source || salePayment.ref_id;
+    salePayment.source = incomingPayment.source || salePayment.source;
+    salePayment.type = paymentType;
+    salePayment.sourceType = paymentType;
+    salePayment.subsource =
+      incomingPayment.subsource !== undefined
+        ? incomingPayment.subsource
+        : salePayment.subsource;
+    salePayment.remarks =
+      incomingPayment.remarks !== undefined
+        ? incomingPayment.remarks
+        : salePayment.remarks;
+    salePayment.transactionNo =
+      incomingPayment.transactionNo !== undefined
+        ? incomingPayment.transactionNo
+        : salePayment.transactionNo;
+    salePayment.upiNo =
+      incomingPayment.upiNo !== undefined
+        ? incomingPayment.upiNo
+        : salePayment.upiNo;
+    salePayment.underCategory =
+      incomingPayment.underCategory || salePayment.underCategory;
+
+    if (
+      incomingPayment.amount !== undefined &&
+      incomingPayment.amount !== null
+    ) {
+      salePayment.amount = incomingPayment.amount;
+    }
+
+    if (isCreditPayment(paymentType)) {
+      salePayment.customer = incomingPayment.source;
+      salePayment.customerName =
+        incomingPayment.customerName || salePayment.customerName || "";
+    } else {
+      salePayment.customer = saleParty?._id || salePayment.customer;
+      salePayment.customerName =
+        saleParty?.partyName || salePayment.customerName || "";
+    }
+  };
+
+  const updateReceipt = ({ receipt, payment, party }) => {
+    const paymentType = getPaymentType(payment);
+    const amount = Number(payment.amount || 0);
+
+    receipt.party = buildReceiptParty(party);
+    receipt.paymentMethod =
+      paymentType === "cash"
+        ? "Cash"
+        : paymentType === "bank"
+          ? "Bank"
+          : paymentType;
+    receipt.paymentDetails = buildReceiptPaymentDetails(payment);
+    receipt.enteredAmount = amount;
+    receipt.totalBillAmount = Number(receipt.totalBillAmount || amount);
+    receipt.remainingAmount = 0;
+    receipt.paymentId = payment.paymentId;
+
+    if (Array.isArray(receipt.billData) && receipt.billData[0]) {
+      receipt.billData[0].settledAmount = amount;
+      receipt.billData[0].remainingAmount = 0;
+    }
+
+    receipt.markModified("party");
+    receipt.markModified("paymentDetails");
+    receipt.markModified("billData");
+  };
+
+  const cancelReceipt = (receipt) => {
+    receipt.isCancelled = true;
+    receipt.cancelledAt = new Date();
+    receipt.cancelledBy = req.sUserId;
+    receipt.cancelledByName = req.secUserName;
+    receipt.cancelReason = "Payment mode changed to Credit";
+  };
+
+  const updateSettlement = ({
+    settlement,
+    payment,
+    party,
+    receipt,
+    cmp_id,
+  }) => {
+    const paymentType = getPaymentType(payment);
+
+    settlement.paymentId = payment.paymentId;
+    settlement.voucherNumber =
+      receipt?.receiptNumber || settlement.voucherNumber;
+    settlement.voucherId = receipt?._id || settlement.voucherId;
+    settlement.voucherModel = "Receipt";
+    settlement.voucherType = "receipt";
+    settlement.amount = Number(payment.amount || settlement.amount || 0);
+    settlement.payment_mode = paymentType;
+    settlement.partyId = party._id;
+    settlement.partyName = party.partyName;
+    settlement.partyType = party.partyType || "party";
+    settlement.sourceId = payment.source;
+    settlement.sourceType = toSettlementSourceType(paymentType);
+    settlement.cmp_id = cmp_id;
+  };
+
+  const updateTallyForRestaurantTransition = async ({
+    transition,
+    tally,
+    payment,
+    receipt,
+    party,
+    sale,
+    cmp_id,
+  }) => {
+    const amount = Number(payment.amount || 0);
+
+    if (!tally) {
+      [tally] = await TallyData.create(
+        [
+          {
+            Primary_user_id: req.pUserId || req.owner || sale.Primary_user_id,
+            cmp_id,
+            party_id: party._id,
+            party_name: party.partyName,
+            mobile_no: party.mobileNumber,
+            bill_date: sale.date || new Date(),
+            bill_no: sale.salesNumber,
+            billId: sale._id,
+            bill_amount: amount,
+            bill_pending_amt: 0,
+            accountGroup: party.accountGroup || party.accountGroup_id,
+            user_id: req.sUserId,
+            advanceAmount: 0,
+            advanceDate: new Date(),
+            classification: "Cr",
+            source: "sales",
+            paymentId: payment.paymentId,
+          },
+        ],
+        { session },
+      );
+    }
+
+    tally.paymentId = payment.paymentId;
+    tally.party_id = party._id;
+    tally.party_name = party.partyName;
+    tally.mobile_no = party.mobileNumber || tally.mobile_no;
+    tally.accountGroup =
+      party.accountGroup || party.accountGroup_id || tally.accountGroup;
+    tally.bill_amount = amount;
+
+    if (
+      transition === "immediate-to-credit" ||
+      transition === "credit-to-credit"
+    ) {
+      tally.bill_pending_amt = amount;
+      tally.appliedReceipts = [];
+    } else if (
+      transition === "credit-to-immediate" ||
+      transition === "immediate-to-immediate"
+    ) {
+      tally.bill_pending_amt = 0;
+      if (receipt) {
+        tally.appliedReceipts = [
+          {
+            _id: receipt._id,
+            receiptNumber: receipt.receiptNumber,
+            settledAmount: amount,
+            date: receipt.date || new Date(),
+          },
+        ];
+      }
+    }
+
+    tally.markModified("appliedReceipts");
+    return await tally.save({ session });
+  };
+
+  const createReceiptAndSettlementForRestaurantPayment = async ({
+    payment,
+    tally,
+    party,
+    sale,
+    cmp_id,
+  }) => {
+    const amount = Number(payment.amount || 0);
+    const receiptSeries = await getRestaurantReceiptSeries(cmp_id);
+    const receiptNumber = await generateVoucherNumber(
+      cmp_id,
+      "receipt",
+      receiptSeries._id.toString(),
+      session,
+    );
+
+    const currentPending = Number(tally?.bill_pending_amt || amount);
+    const receipt = new ReceiptModel({
+      date: new Date(),
+      voucherType: "receipt",
+      receiptNumber: receiptNumber.voucherNumber,
+      series_id: receiptSeries._id,
+      usedSeriesNumber: receiptNumber.usedSeriesNumber,
+      serialNumber: receiptNumber.usedSeriesNumber,
+      Primary_user_id: req.pUserId || req.owner || sale.Primary_user_id,
+      Secondary_user_id: req.sUserId || sale.Secondary_user_id,
+      cmp_id,
+      party: buildReceiptParty(party),
+      guest: sale.guest || undefined,
+      billData: [
+        {
+          _id: tally._id,
+          bill_no: sale.salesNumber,
+          billId: sale._id.toString(),
+          bill_date: tally.bill_date || sale.date || new Date(),
+          bill_pending_amt: currentPending,
+          source: "restaurant",
+          settledAmount: amount,
+          remainingAmount: 0,
+        },
+      ],
+      totalBillAmount: currentPending,
+      enteredAmount: amount,
+      advanceAmount: 0,
+      remainingAmount: 0,
+      paymentMethod:
+        getPaymentType(payment) === "cash"
+          ? "Cash"
+          : getPaymentType(payment) === "bank"
+            ? "Bank"
+            : getPaymentType(payment),
+      paymentDetails: buildReceiptPaymentDetails(payment),
+      note: "",
+      isCancelled: false,
+      paymentId: payment.paymentId,
+    });
+
+    await receipt.save({ session });
+
+    const [settlement] = await settlementModel.create(
+      [
+        {
+          voucherNumber: receipt.receiptNumber,
+          voucherId: receipt._id,
+          voucherModel: "Receipt",
+          voucherType: "receipt",
+          amount,
+          payment_mode: getPaymentType(payment),
+          paymentId: payment.paymentId,
+          partyId: party._id,
+          partyName: party.partyName,
+          partyType: party.partyType || "party",
+          sourceId: payment.source,
+          sourceType: toSettlementSourceType(getPaymentType(payment)),
+          cmp_id,
+          Primary_user_id: req.pUserId || req.owner || sale.Primary_user_id,
+          settlement_date: new Date(),
+          voucher_date: receipt.date || new Date(),
+        },
+      ],
+      { session },
+    );
+
+    return { receipt, settlement };
+  };
+
   try {
     session.startTransaction();
 
@@ -7584,128 +9379,328 @@ export const updateRestaurantSalePayments = async (req, res) => {
     const { id } = req.params;
     const { payments } = req.body;
 
+    if (!id || !cmp_id) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "id and cmp_id are required" });
+    }
+
+    if (!Array.isArray(payments)) {
+      await session.abortTransaction();
+      return res.status(400).json({ message: "payments must be an array" });
+    }
+
     const sale = await salesModel.findOne({ _id: id, cmp_id }).session(session);
 
     if (!sale) {
       await session.abortTransaction();
-      session.endSession();
       return res.status(404).json({ message: "Sale not found" });
     }
 
-    // console.log("sale", sale);
+    const saleParty =
+      (sale.party?._id &&
+        (await Party.findOne({ _id: sale.party._id, cmp_id }).session(
+          session,
+        ))) ||
+      sale.party;
 
-    // Update payment splits by index
-    payments.forEach((payment, index) => {
-      const matchingPayment = sale.paymentSplittingData[index];
-      if (!matchingPayment) return;
+    const oldPayments = (sale.paymentSplittingData || []).map((payment) =>
+      toPlainObject(payment),
+    );
+    const oldPaymentMap = createStrictPaymentMap(oldPayments, "Sale payment");
+    const incomingPaymentMap = createStrictPaymentMap(
+      payments,
+      "Request payment",
+    );
 
-      matchingPayment.ref_id = payment.source || matchingPayment.ref_id;
-      matchingPayment.source = payment.source || matchingPayment.source;
-      matchingPayment.type =
-        payment.sourceType?.toLowerCase() || matchingPayment.type;
-      matchingPayment.sourceType =
-        payment.sourceType?.toLowerCase() || matchingPayment.sourceType;
-      matchingPayment.subsource =
-        payment.subsource || matchingPayment.subsource;
-      matchingPayment.remarks = payment.remarks ?? matchingPayment.remarks;
-    });
+    if (oldPaymentMap.size !== incomingPaymentMap.size) {
+      throw new Error("Request payments do not match the sale payment rows");
+    }
+
+    for (const salePayment of sale.paymentSplittingData || []) {
+      const paymentIdKey = getPaymentIdKey(salePayment.paymentId);
+      const incomingPayment = incomingPaymentMap.get(paymentIdKey);
+
+      if (!incomingPayment) {
+        throw new Error(
+          `Request payment not found for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      updateSalePayment({
+        salePayment,
+        incomingPayment,
+        saleParty,
+      });
+    }
 
     sale.markModified("paymentSplittingData");
     await sale.save({ session });
 
-    /// update receipts
-    const receipts = await ReceiptModel.find({
+    const updatedPayments = (sale.paymentSplittingData || []).map((payment) =>
+      toPlainObject(payment),
+    );
+    const paymentIds = updatedPayments.map((payment) => payment.paymentId);
+
+    const activeReceipts = await ReceiptModel.find({
       cmp_id,
       "billData.bill_no": sale.salesNumber,
+      isCancelled: { $ne: true },
     }).session(session);
 
-    if (receipts.length > 0) {
-      await Promise.all(
-        receipts.map(async (receipt, index) => {
-          const matchedPayment = sale.paymentSplittingData[index] || null;
+    const receiptMap = createActiveDocumentMap(activeReceipts, "Receipt");
+    const immediateOldPayments = oldPayments.filter((payment) =>
+      isImmediatePayment(getPaymentType(payment)),
+    );
+    const receiptsWithoutPaymentId = activeReceipts.filter(
+      (receipt) => !getPaymentIdKey(receipt.paymentId),
+    );
 
-          if (matchedPayment) {
-            const isCash = matchedPayment.sourceType?.toLowerCase() === "cash";
+    receiptsWithoutPaymentId.forEach((receipt, index) => {
+      const payment = immediateOldPayments[index];
+      const paymentIdKey = getPaymentIdKey(payment?.paymentId);
+      if (paymentIdKey && !receiptMap.has(paymentIdKey)) {
+        receiptMap.set(paymentIdKey, receipt);
+      }
+    });
 
-            if (isCash) {
-              receipt.paymentMethod = "Cash";
-              receipt.paymentDetails.cash_id =
-                matchedPayment.source || receipt.paymentDetails.cash_id;
-              receipt.paymentDetails.cash_ledname =
-                matchedPayment.subsource || receipt.paymentDetails.cash_ledname;
-              receipt.paymentDetails.cash_name =
-                matchedPayment.subsource || receipt.paymentDetails.cash_name;
-              receipt.paymentDetails.bank_id = null;
-              receipt.paymentDetails.bank_ledname = "";
-              receipt.paymentDetails.bank_name = "";
-            } else {
-              receipt.paymentMethod =
-                matchedPayment.sourceType || receipt.paymentMethod;
-              receipt.paymentDetails.bank_id =
-                matchedPayment.source || receipt.paymentDetails.bank_id;
-              receipt.paymentDetails.bank_ledname =
-                matchedPayment.subsource || receipt.paymentDetails.bank_ledname;
-              receipt.paymentDetails.bank_name =
-                matchedPayment.subsource || receipt.paymentDetails.bank_name;
-              receipt.paymentDetails.cash_id = null;
-              receipt.paymentDetails.cash_ledname = "";
-              receipt.paymentDetails.cash_name = "";
-            }
-
-            receipt.markModified("paymentDetails");
-          }
-
-          await receipt.save({ session });
-        }),
-      );
-    }
-
-    const receiptVoucherNumbers = receipts
-      .map((r) => r.receiptNumber)
+    const receiptVoucherNumbers = activeReceipts
+      .map((receipt) => receipt.receiptNumber)
       .filter(Boolean);
 
-    /// update settlements
     const settlements = await settlementModel
       .find({
         cmp_id,
-        voucherNumber: { $in: receiptVoucherNumbers },
+        $or: [
+          { paymentId: { $in: paymentIds } },
+          { voucherNumber: { $in: receiptVoucherNumbers } },
+        ],
       })
       .session(session);
 
-    console.log("settlements", settlements);
+    const settlementMap = createActiveDocumentMap(settlements, "Settlement");
+    const settlementsByVoucherNumber = new Map(
+      settlements
+        .filter((settlement) => settlement.voucherNumber)
+        .map((settlement) => [settlement.voucherNumber, settlement]),
+    );
 
-    if (settlements.length > 0) {
-      await Promise.all(
-        settlements.map(async (settlement, index) => {
-          const matchedPayment = sale.paymentSplittingData[index] || null;
-
-          if (matchedPayment) {
-            const rawType = matchedPayment.sourceType?.toLowerCase();
-
-            settlement.sourceId = matchedPayment.source || settlement.sourceId;
-            settlement.sourceType = rawType === "cash" ? "cash" : "bank";
-            settlement.payment_mode = rawType || settlement.payment_mode; // "cash" | "bank" | "upi" | "card"
-          }
-
-          await settlement.save({ session });
-        }),
-      );
+    for (const [paymentIdKey, receipt] of receiptMap.entries()) {
+      if (!settlementMap.has(paymentIdKey)) {
+        const settlement = settlementsByVoucherNumber.get(
+          receipt.receiptNumber,
+        );
+        if (settlement) settlementMap.set(paymentIdKey, settlement);
+      }
     }
 
+    const tallyRecords = await TallyData.find({
+      cmp_id,
+      $or: [
+        { paymentId: { $in: paymentIds } },
+        { billId: sale._id.toString() },
+        { billId: sale._id },
+        { bill_no: sale.salesNumber },
+      ],
+      isCancelled: { $ne: true },
+    }).session(session);
+
+    const tallyMap = createActiveDocumentMap(tallyRecords, "Tally");
+    for (const payment of updatedPayments) {
+      const paymentIdKey = getPaymentIdKey(payment.paymentId);
+      const oldPayment = oldPaymentMap.get(paymentIdKey);
+      const oldPaymentType = getPaymentType(oldPayment);
+      const newPaymentType = getPaymentType(payment);
+      const oldIsCredit = isCreditPayment(oldPaymentType);
+      const newIsCredit = isCreditPayment(newPaymentType);
+      const oldIsImmediate = isImmediatePayment(oldPaymentType);
+      const newIsImmediate = isImmediatePayment(newPaymentType);
+
+      if (!oldIsCredit && !oldIsImmediate) {
+        throw new Error(
+          `Unsupported old payment mode "${oldPaymentType}" for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      if (!newIsCredit && !newIsImmediate) {
+        throw new Error(
+          `Unsupported new payment mode "${newPaymentType}" for paymentId ${paymentIdKey}`,
+        );
+      }
+
+      const creditParty =
+        newIsCredit || oldIsCredit
+          ? await Party.findOne({
+              _id: payment.source || oldPayment.source || oldPayment.customer,
+              cmp_id,
+            }).session(session)
+          : null;
+      const activeParty = newIsCredit ? creditParty : saleParty;
+
+      if (!activeParty) {
+        throw new Error(`Party not found for paymentId ${paymentIdKey}`);
+      }
+
+      let receipt = receiptMap.get(paymentIdKey);
+      let settlement = settlementMap.get(paymentIdKey);
+      let tally = tallyMap.get(paymentIdKey);
+
+      if (oldIsCredit && !tally) {
+        tally = tallyRecords.find(
+          (record) =>
+            record.party_id?.toString?.() ===
+              (oldPayment.source || oldPayment.customer)?.toString?.() &&
+            Number(record.bill_pending_amt || 0) > 0,
+        );
+      }
+
+      if (oldIsImmediate && newIsImmediate) {
+        if (!receipt) {
+          throw new Error(
+            `Active Receipt not found for paymentId ${paymentIdKey}`,
+          );
+        }
+        if (!settlement) {
+          throw new Error(
+            `Active Settlement not found for paymentId ${paymentIdKey}`,
+          );
+        }
+
+        updateReceipt({ receipt, payment, party: saleParty });
+        updateSettlement({
+          settlement,
+          payment,
+          party: saleParty,
+          receipt,
+          cmp_id,
+        });
+        await receipt.save({ session });
+        await settlement.save({ session });
+
+        if (tally) {
+          await updateTallyForRestaurantTransition({
+            transition: "immediate-to-immediate",
+            tally,
+            payment,
+            receipt,
+            party: saleParty,
+            sale,
+            cmp_id,
+          });
+        }
+      } else if (oldIsImmediate && newIsCredit) {
+        if (!receipt) {
+          throw new Error(
+            `Active Receipt not found for paymentId ${paymentIdKey}`,
+          );
+        }
+        if (!settlement) {
+          throw new Error(
+            `Active Settlement not found for paymentId ${paymentIdKey}`,
+          );
+        }
+
+        receipt.paymentId = payment.paymentId;
+        cancelReceipt(receipt);
+        await receipt.save({ session });
+        await settlementModel.deleteOne({ _id: settlement._id }, { session });
+
+        await updateTallyForRestaurantTransition({
+          transition: "immediate-to-credit",
+          tally: null,
+          payment,
+          receipt: null,
+          party: creditParty,
+          sale,
+          cmp_id,
+        });
+      } else if (oldIsCredit && newIsImmediate) {
+        if (receipt) {
+          throw new Error(
+            `Active Receipt already exists for Credit paymentId ${paymentIdKey}`,
+          );
+        }
+        if (settlement) {
+          throw new Error(
+            `Active Settlement already exists for Credit paymentId ${paymentIdKey}`,
+          );
+        }
+
+        tally = await updateTallyForRestaurantTransition({
+          transition: "credit-to-immediate",
+          tally,
+          payment,
+          receipt: null,
+          party: saleParty,
+          sale,
+          cmp_id,
+        });
+
+        const created = await createReceiptAndSettlementForRestaurantPayment({
+          payment,
+          tally,
+          party: saleParty,
+          sale,
+          cmp_id,
+        });
+
+        await updateTallyForRestaurantTransition({
+          transition: "credit-to-immediate",
+          tally,
+          payment,
+          receipt: created.receipt,
+          party: saleParty,
+          sale,
+          cmp_id,
+        });
+      } else if (oldIsCredit && newIsCredit) {
+        await updateTallyForRestaurantTransition({
+          transition: "credit-to-credit",
+          tally,
+          payment,
+          receipt: null,
+          party: creditParty,
+          sale,
+          cmp_id,
+        });
+      }
+    }
+
+    const finalSale = await salesModel
+      .findOne({
+        _id: id,
+        cmp_id,
+      })
+      .session(session);
+
     await session.commitTransaction();
-    session.endSession();
 
     return res.status(200).json({
       success: true,
       message: "Restaurant sale payments updated successfully",
-      data: sale,
+      data: finalSale,
     });
   } catch (error) {
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+
     console.error("updateRestaurantSalePayments error:", error);
-    return res.status(500).json({
-      message: "Server error",
+
+    const isValidationOrIntegrityError =
+      error.message?.includes("required") ||
+      error.message?.includes("not found") ||
+      error.message?.includes("Duplicate") ||
+      error.message?.includes("Multiple active") ||
+      error.message?.includes("Unsupported") ||
+      error.message?.includes("do not match") ||
+      error.message?.includes("already exists");
+
+    return res.status(isValidationOrIntegrityError ? 400 : 500).json({
+      message: isValidationOrIntegrityError ? error.message : "Server error",
       error: error.message,
     });
+  } finally {
+    await session.endSession();
   }
 };
 export const getRestaurantSales = async (req, res) => {
@@ -8187,7 +10182,7 @@ export const getFOSalesSummary = async (req, res) => {
         checkout,
       );
       console.log(checkout);
-      const extraPersonCount = roomDetails?.additionalPaxCount
+      const extraPersonCount = roomDetails?.additionalPaxCount;
 
       const roomSaleAmount = Number(roomDetails?.taxableAmount || 0);
 
@@ -8221,7 +10216,7 @@ export const getFOSalesSummary = async (req, res) => {
       const billTotal =
         restaurantSaleAmount +
         Number(roomDetails?.taxableAmount || 0) +
-        Number(roomDetails?.roomTaxAmount || 0) + 
+        Number(roomDetails?.roomTaxAmount || 0) +
         Number(roomDetails?.specificFoodPlanTotal || 0) +
         Number(roomDetails?.additionalPaxWithTax || 0) -
         advance;
@@ -8262,8 +10257,12 @@ export const getFOSalesSummary = async (req, res) => {
         plan: checkout?.foodPlan?.[0]?.foodPlan || "",
         roomSaleAmount,
         planSaleAmount: Number(roomDetails?.taxableSpecificFoodPlan || 0),
-        additionalPaxTaxAmount: Number(roomDetails?.additionalPaxTaxAmount || 0),
-        additionalPaxWithOutTax: Number(roomDetails?.additionalPaxWithoutTax || 0),
+        additionalPaxTaxAmount: Number(
+          roomDetails?.additionalPaxTaxAmount || 0,
+        ),
+        additionalPaxWithOutTax: Number(
+          roomDetails?.additionalPaxWithoutTax || 0,
+        ),
         cgst,
         sgst,
         totalTax: roundedTotalTax,
@@ -8299,7 +10298,6 @@ export const getFOSalesSummary = async (req, res) => {
     });
   }
 };
-
 
 export const getFlashReportForDate = async (req, res) => {
   try {
@@ -9391,6 +11389,420 @@ export const getSpecificDataForPrint = async (req, res) => {
       success: false,
       message: "Server error",
       error: error.message,
+    });
+  }
+};
+
+export const loginReport = async (req, res) => {
+  try {
+    const { cmp_id } = req.params;
+
+    const {
+      page = 1,
+      limit = 20,
+      search = "",
+      fromDate,
+      toDate,
+      status,
+      bookingType,
+      guestName,
+      mobileNumber,
+    } = req.query;
+
+    const pageNumber = parseInt(page) || 1;
+    const limitNumber = parseInt(limit) || 20;
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const filter = {
+      cmp_id: new mongoose.Types.ObjectId(cmp_id),
+    };
+
+    // Date Filter
+    if (fromDate || toDate) {
+      filter.arrivalDate = {};
+
+      if (fromDate) {
+        filter.arrivalDate.$gte = fromDate;
+      }
+
+      if (toDate) {
+        filter.arrivalDate.$lte = toDate;
+      }
+    }
+
+    // Booking Type
+    if (bookingType && bookingType !== "all") {
+      filter.bookingType = bookingType;
+    }
+
+    // Guest Name
+    if (guestName) {
+      filter.customerName = {
+        $regex: guestName,
+        $options: "i",
+      };
+    }
+
+    // Mobile Number
+    if (mobileNumber) {
+      filter.mobileNumber = {
+        $regex: mobileNumber,
+      };
+    }
+
+    // Search
+    if (search.trim()) {
+      const searchValue = search.trim();
+
+      filter.$or = [
+        {
+          voucherNumber: {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
+        {
+          customerName: {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
+        {
+          mobileNumber: {
+            $regex: searchValue,
+          },
+        },
+        {
+          "selectedRooms.roomName": {
+            $regex: searchValue,
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    // -----------------------------
+    // Create Summary Filter BEFORE status filter
+    // -----------------------------
+    const summaryFilter = {
+      ...filter,
+    };
+
+    if (filter.arrivalDate) {
+      summaryFilter.arrivalDate = { ...filter.arrivalDate };
+    }
+
+    if (filter.$or) {
+      summaryFilter.$or = [...filter.$or];
+    }
+
+    // -----------------------------
+    // Status Filter (Listing only)
+    // -----------------------------
+    if (status && status !== "all") {
+      filter.$and = filter.$and || [];
+
+      if (status === "checkIn") {
+        filter.$and.push({
+          $or: [{ status: "" }, { status: "checkIn" }, { status: null }],
+        });
+      } else if (status === "checkOut") {
+        filter.$and.push({
+          $or: [
+            { status: "checkOut" },
+            { status: "CheckOut" },
+            { status: "Checkout" },
+          ],
+        });
+      } else if (status === "cancelled") {
+        filter.$and.push({
+          $or: [{ status: "cancelled" }, { status: "Cancelled" }],
+        });
+      }
+    }
+
+    // console.log("Filter:", filter);
+    // console.log("Summary Filter:", summaryFilter);
+
+    const [bookings, totalBookings, groupedStatus] = await Promise.all([
+      CheckIn.find(filter)
+        .populate("Secondary_user_id", "username name")
+        .sort({
+          createdAt: -1,
+          _id: -1,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      CheckIn.countDocuments(filter),
+
+      CheckIn.aggregate([
+        {
+          $match: summaryFilter,
+        },
+        {
+          $group: {
+            _id: "$status",
+            count: {
+              $sum: 1,
+            },
+          },
+        },
+      ]),
+    ]);
+
+    const summary = {
+      total: 0,
+      checkIn: 0,
+      checkOut: 0,
+      cancelled: 0,
+    };
+
+    groupedStatus.forEach((item) => {
+      const count = Number(item.count || 0);
+
+      summary.total += count;
+
+      if (item._id === "" || item._id === "checkIn" || item._id === null) {
+        summary.checkIn += count;
+      } else if (
+        item._id === "checkOut" ||
+        item._id === "CheckOut" ||
+        item._id === "Checkout"
+      ) {
+        summary.checkOut += count;
+      } else if (item._id === "cancelled" || item._id === "Cancelled") {
+        summary.cancelled += count;
+      }
+    });
+
+    const processedBookings = bookings.map((booking) => ({
+      ...booking,
+      createdBy:
+        booking.Secondary_user_id?.username ||
+        booking.Secondary_user_id?.name ||
+        "-",
+    }));
+
+    const totalPages = Math.ceil(totalBookings / limitNumber);
+    console.log({
+      page: pageNumber,
+      limit: limitNumber,
+      returned: bookings.length,
+      total: totalBookings,
+      totalPages,
+      hasMore: pageNumber < totalPages,
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: processedBookings,
+      summary,
+      pagination: {
+        total: totalBookings,
+        page: pageNumber,
+        limit: limitNumber,
+        totalPages,
+        hasMore: pageNumber < totalPages,
+      },
+    });
+  } catch (error) {
+    console.error("loginReport error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Internal Server Error",
+    });
+  }
+};
+
+export const loginReportExport = async (req, res) => {
+  try {
+    const { cmp_id } = req.params;
+
+    const {
+      type,
+      search = "",
+      fromDate,
+      toDate,
+      status,
+      bookingType,
+      guestName,
+      mobileNumber,
+    } = req.query;
+
+    console.log("Export Query:", req.query); // Remove after testing
+
+    const filter = {
+      cmp_id: new mongoose.Types.ObjectId(cmp_id),
+    };
+
+    // Date Filter
+    if (fromDate || toDate) {
+      filter.arrivalDate = {};
+
+      if (fromDate) filter.arrivalDate.$gte = fromDate;
+      if (toDate) filter.arrivalDate.$lte = toDate;
+    }
+
+    // Booking Type
+    if (bookingType && bookingType !== "all") {
+      filter.bookingType = bookingType;
+    }
+
+    // Guest Name
+    if (guestName) {
+      filter.customerName = {
+        $regex: guestName,
+        $options: "i",
+      };
+    }
+
+    // Mobile Number
+    if (mobileNumber) {
+      filter.mobileNumber = {
+        $regex: mobileNumber,
+      };
+    }
+
+    // Search
+    if (search.trim()) {
+      filter.$or = [
+        {
+          voucherNumber: {
+            $regex: search.trim(),
+            $options: "i",
+          },
+        },
+        {
+          customerName: {
+            $regex: search.trim(),
+            $options: "i",
+          },
+        },
+        {
+          mobileNumber: {
+            $regex: search.trim(),
+          },
+        },
+        {
+          "selectedRooms.roomName": {
+            $regex: search.trim(),
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    // Status Filter
+    if (status && status !== "all") {
+      filter.$and = [];
+
+      if (status === "checkIn") {
+        filter.$and.push({
+          $or: [{ status: "" }, { status: "checkIn" }, { status: null }],
+        });
+      } else if (status === "checkOut") {
+        filter.$and.push({
+          $or: [
+            { status: "checkOut" },
+            { status: "CheckOut" },
+            { status: "Checkout" },
+          ],
+        });
+      } else if (status === "cancelled") {
+        filter.$and.push({
+          $or: [{ status: "cancelled" }, { status: "Cancelled" }],
+        });
+      }
+    }
+
+    const bookings = await CheckIn.find(filter)
+      .populate("Secondary_user_id", "username name")
+      .sort({
+        createdAt: -1,
+        _id: -1,
+      })
+      .lean();
+    const processedBookings = bookings.map((booking) => {
+      const roomNameById = (id) => {
+        const room = booking.selectedRooms?.find(
+          (r) => String(r.roomId) === String(id),
+        );
+
+        return room?.roomName || "-";
+      };
+
+      return {
+        ...booking,
+
+        guestName: booking.guestName || booking.customerName || "-",
+
+        room:
+          booking.selectedRooms?.map((room) => room.roomName).join(", ") || "-",
+
+        createdBy:
+          booking.Secondary_user_id?.username ||
+          booking.Secondary_user_id?.name ||
+          "-",
+
+        created: booking.createdAt
+          ? new Date(booking.createdAt).toLocaleString("en-IN")
+          : "-",
+
+        updated: booking.updatedAt
+          ? new Date(booking.updatedAt).toLocaleString("en-IN")
+          : "-",
+
+        roomSwapHistory: booking.roomSwapHistory?.length
+          ? booking.roomSwapHistory.map((swap) => ({
+              from: roomNameById(swap.fromRoomId),
+              to: roomNameById(swap.toRoomId),
+              reason: swap.reason || "-",
+              date: swap.swapDate
+                ? new Date(swap.swapDate).toLocaleString("en-IN")
+                : "-",
+            }))
+          : [],
+
+        partialCheckoutHistory: booking.partialCheckoutHistory?.length
+          ? booking.partialCheckoutHistory.map((pc) => ({
+              saleVoucherNumber: pc.saleVoucherNumber || "-",
+              rooms:
+                pc.roomsCheckedOut?.map((r) => r.roomName).join(", ") || "-",
+              date: pc.date ? new Date(pc.date).toLocaleString("en-IN") : "-",
+            }))
+          : [],
+      };
+    });
+    switch (type) {
+      case "excel":
+        try {
+          return await exportLoginReportExcel(res, processedBookings);
+        } catch (err) {
+          console.error("Excel Error:", err);
+          return res.status(500).json({
+            success: false,
+            message: err.message,
+          });
+        }
+
+      case "pdf":
+        return exportLoginReportPdf(res, processedBookings);
+
+      default:
+        return res.status(400).json({
+          success: false,
+          message: "Invalid export type",
+        });
+    }
+  } catch (error) {
+    console.error("loginReportExport:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
     });
   }
 };

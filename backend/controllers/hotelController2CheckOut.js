@@ -43,8 +43,12 @@ export const convertCheckOutToSale = async (req, res) => {
         checkoutMode,
         checkinIds,
         restaurantSideDiscountAdjustmentArray,
+        checkoutRequestId,
       } = req.body;
 
+      if (!checkoutRequestId) {
+        throw new Error("Missing checkout request id");
+      }
       // ── Validations ──────────────────────────────────────────────────────
       if (!cmp_id) throw new Error("Missing cmp_id");
       if (!Array.isArray(selectedCheckOut) || selectedCheckOut.length === 0)
@@ -246,14 +250,6 @@ export const convertCheckOutToSale = async (req, res) => {
         console.log("paymentSplittingArray", paymentSplittingArray);
         console.log("restaurantSplitArray", restaurantSplitArray);
 
-        // ── Sale voucher number ──────────────────────────────────────────
-        const saleNumber = await generateVoucherNumber(
-          cmp_id,
-          "sales",
-          specificVoucherSeries._id.toString(),
-          session,
-        );
-
         const checkInId = item?._id;
         const roomsBeingCheckedOut = item?.selectedRooms || [];
         const originalCheckIn =
@@ -261,6 +257,32 @@ export const convertCheckOutToSale = async (req, res) => {
 
         if (!originalCheckIn)
           throw new Error(`Check-in ${checkInId} not found`);
+
+        // validation side
+        if (String(originalCheckIn.status || "").toLowerCase() === "checkout") {
+          throw new Error(
+            `Check-in ${originalCheckIn.voucherNumber || checkInId} is already checked out`,
+          );
+        }
+
+        console.log("roomsBeingCheckedOut",roomsBeingCheckedOut)
+
+        if (
+          !Array.isArray(roomsBeingCheckedOut) ||
+          roomsBeingCheckedOut.length === 0
+        ) {
+          throw new Error(
+            `No rooms selected for check-in ${originalCheckIn.voucherNumber || checkInId}`,
+          );
+        }
+
+        // ── Sale voucher number ──────────────────────────────────────────
+        const saleNumber = await generateVoucherNumber(
+          cmp_id,
+          "sales",
+          specificVoucherSeries._id.toString(),
+          session,
+        );
 
         const isThisPartial =
           item.isPartialCheckout ||
@@ -281,9 +303,10 @@ export const convertCheckOutToSale = async (req, res) => {
         // ── Checkout amount types (for display) ──────────────────────────
         let checkoutamounttypes = [];
         if (paymentMode !== "credit") {
-          checkoutamounttypes = split
+          checkoutamounttypes = paymentSplittingArray
             .filter((s) => s.underCategory !== "food")
             .map((s) => ({
+              paymentId: s.paymentId,
               customerName: s.customerName,
               mode: s.subsource,
               amount: Number(s.amount || 0),
@@ -291,6 +314,7 @@ export const convertCheckOutToSale = async (req, res) => {
         } else {
           checkoutamounttypes = [
             {
+              paymentId: paymentSplittingArray[0]?.paymentId || null,
               customerName: paymentDetails.selectedCreditor?.partyName,
               mode: "credit",
               amount: Number(paymentDetails.cashAmount || 0),
@@ -326,6 +350,7 @@ export const convertCheckOutToSale = async (req, res) => {
               Primary_user_id: req.owner || req.pUserId,
               voucherNumber: saleNumber?.voucherNumber,
               checkInId,
+              checkoutRequestId,
               bookingId: item?.bookingId?._id || item?.bookingId,
               customerId: selectedPartyId,
               customerName: item?.customerId?.partyName || party?.customerName,
@@ -412,6 +437,7 @@ export const convertCheckOutToSale = async (req, res) => {
                   : 0, // pending only for credit
                 session,
                 "checkout",
+                splitEntry.paymentId,
               );
               tallyRows.push(...rows);
             }
@@ -427,6 +453,7 @@ export const convertCheckOutToSale = async (req, res) => {
               amount, // bill_pending_amt ← createReceiptsAndSettlements reduces this
               session,
               "checkout",
+              null,
             );
             tallyRows.push(...rows);
           }
@@ -466,17 +493,25 @@ export const convertCheckOutToSale = async (req, res) => {
           await updateStatus(roomsBeingCheckedOut, "dirty", session);
         } else {
           if (checkoutMode === "single") {
-            await CheckIn.updateMany(
-              { _id: { $in: checkinIds } },
+            const updateResult = await CheckIn.updateMany(
+              { _id: { $in: checkinIds }, status: { $ne: "checkOut" } },
               { $set: { status: "checkOut", checkOutDate: new Date() } },
               { session },
             );
+
+            if (updateResult.modifiedCount !== checkinIds.length) {
+              throw new Error("One or more check-ins are already checked out");
+            }
           } else {
-            await CheckIn.updateOne(
-              { _id: checkInId },
-              { status: "checkOut", checkOutDate: new Date() },
+            const updateResult = await CheckIn.updateOne(
+              { _id: checkInId, status: { $ne: "checkOut" } },
+              { $set: { status: "checkOut", checkOutDate: new Date() } },
               { session },
             );
+
+            if (updateResult.modifiedCount === 0) {
+              throw new Error("This check-in is already checked out");
+            }
           }
           await updateStatus(roomsBeingCheckedOut, "dirty", session);
         }
@@ -648,7 +683,18 @@ export const convertCheckOutToSale = async (req, res) => {
     });
   } catch (error) {
     console.error("Error converting checkout:", error);
-    res.status(500).json({
+    if (error.code === 11000) {
+  return res.status(409).json({
+    success: false,
+    message: "Checkout already processed. Please refresh.",
+  });
+}
+    const isCheckoutConflict =
+      error.message?.includes("already checked out") ||
+      error.message?.includes("No rooms selected") ||
+      error.message?.includes("Duplicate rooms selected");
+
+    res.status(isCheckoutConflict ? 409 : 500).json({
       success: false,
       message: error.message || "Internal server error",
     });
@@ -984,6 +1030,7 @@ async function createPaymentSplittingArray(
       }
 
       const splitObj = {
+        paymentId: new mongoose.Types.ObjectId(),
         type: splitSourceType,
         amount: Number(split.amount || 0),
         ref_id: resolvedSourceId,
@@ -1027,6 +1074,7 @@ async function createPaymentSplittingArray(
       transactionNo: "",
       underCategory: "room",
       upiNo: "",
+      paymentId: new mongoose.Types.ObjectId(),
     });
 
     restaurantSplitArray.push({
@@ -1043,6 +1091,7 @@ async function createPaymentSplittingArray(
       transactionNo: "",
       underCategory: "food",
       upiNo: "",
+      paymentId: new mongoose.Types.ObjectId(),
     });
   } else {
     const split = paymentDetails?.splitDetails?.[0] ?? {};
@@ -1066,6 +1115,7 @@ async function createPaymentSplittingArray(
           transactionNo: split?.transactionNo ?? "",
           underCategory: "room",
           upiNo: split?.upiNo ?? "",
+          paymentId: new mongoose.Types.ObjectId(),
         });
       }
 
@@ -1084,6 +1134,7 @@ async function createPaymentSplittingArray(
           transactionNo: split?.transactionNo ?? "",
           underCategory: "food",
           upiNo: split?.upiNo ?? "",
+          paymentId: new mongoose.Types.ObjectId(),
         });
       }
     }
@@ -1115,6 +1166,7 @@ async function createPaymentSplittingArray(
           transactionNo: split?.transactionNo ?? "",
           underCategory: "room",
           upiNo: split?.upiNo ?? "",
+          paymentId: new mongoose.Types.ObjectId(),
         });
       }
 
@@ -1133,6 +1185,7 @@ async function createPaymentSplittingArray(
           transactionNo: split?.transactionNo ?? "",
           underCategory: "food",
           upiNo: split?.upiNo ?? "",
+          paymentId: new mongoose.Types.ObjectId(),
         });
       }
     }
@@ -1163,6 +1216,7 @@ async function createPaymentSplittingArray(
         underCategory: "food",
         upiNo: "",
         splitSaleId: null,
+        paymentId: new mongoose.Types.ObjectId(),
       });
     } else {
       splitsToDistribute = restaurantSplitArray.map((s) => ({ ...s }));
@@ -1346,7 +1400,7 @@ async function createSalesVoucher(
         usedSeriesNumber: saleNumber.usedSeriesNumber,
         Primary_user_id: req.pUserId || req.owner,
         cmp_id,
-        secondary_user_id: req.sUserId,
+        Secondary_user_id: req.sUserId,
         party,
         partyAccount: selectedParty.accountGroup?.accountGroup,
         items,
@@ -1380,6 +1434,7 @@ async function createTallyEntry(
   pendingAmt, // bill_pending_amt  ← NEW param
   session,
   from = "other",
+  paymentId,
 ) {
   const selectedOne = await Party.findOne({ _id: selectedParty }).session(
     session,
@@ -1404,6 +1459,7 @@ async function createTallyEntry(
         advanceDate: new Date(),
         classification: "Dr",
         source: "sales",
+        paymentId,
         ...(from === "checkout" ? { cantChange: true } : {}),
       },
     ],

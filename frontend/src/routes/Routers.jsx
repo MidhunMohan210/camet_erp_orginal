@@ -1,5 +1,6 @@
 import { Route, Routes } from "react-router-dom";
 import { lazy, Suspense } from "react";
+const ProformaInvoicePage = lazy(() => import("../pages/voucher/voucherCreation/ProformaInvoicePage"));
 const ProtectedSecRoute = lazy(() => import("./ProtectedSecRoute"));
 import SuspenseLoader from "@/components/common/SuspenseLoader";
 import { ErrorTestComponent } from "@/components/errorBoundaries/ErrorTestComponent";
@@ -474,6 +475,7 @@ const SummaryDashboard = lazy(
 )
 const BillSummary = lazy(() => import("@/pages/Hotel/Pages/BillSummary"))
 const CancellationReport=lazy(()=>import("@/pages/Hotel/Pages/CancellationReport"))
+const LoginReport = lazy(() => import("@/pages/Hotel/Pages/LoginReport"))
 const Receiptreport = lazy(() => import("@/pages/Hotel/Pages/Receiptreport"))
 const TravelAgentReport = lazy(() => import("@/pages/Hotel/Pages/TravelAgentReport"))
 const CheckInPrint = lazy(() => import("@/pages/Hotel/Pages/CheckInPrint"))
@@ -482,6 +484,10 @@ const Checkoutpdf = lazy(() => import("@/pages/Hotel/Pages/Checkoutpdf"))
 const ReceiptInvoicepage = lazy(
   () => import("@/pages/Hotel/Pages/ReceiptInvoicepage"),
 );
+
+const KotPrinterSetting = lazy(
+  () => import("@/pages/secUsers/settilngs/KotPrinterSetting"),
+)
 const Routers = () => {
   return (
     <Suspense fallback={<SuspenseLoader />}>
@@ -699,6 +705,12 @@ const Routers = () => {
           }
         ></Route>
 
+        <Route path="/sUsers/performaInvoice" element={<ProtectedSecRoute><ProformaInvoicePage /></ProtectedSecRoute>} />
+        <Route path="/sUsers/searchPartyperformaInvoice" element={<ProtectedSecRoute><SearchParty /></ProtectedSecRoute>} />
+        <Route path="/sUsers/performaInvoiceDetails/:id" element={<ProtectedSecRoute><VoucherDetails /></ProtectedSecRoute>} />
+        <Route path="/sUsers/editperformaInvoice/:id" element={<ProtectedSecRoute><ProformaInvoicePage /></ProtectedSecRoute>} />
+        <Route path="/sUsers/shareperformaInvoice/:id" element={<ProtectedSecRoute><VoucherPdfInitiator /></ProtectedSecRoute>} />
+        <Route path="/sUsers/shareperformaInvoiceThreeInch/:id" element={<ProtectedSecRoute><VoucherPdfInitiatorThreeInch /></ProtectedSecRoute>} />
         <Route
           path="/sUsers/sales"
           element={
@@ -2185,6 +2197,14 @@ const Routers = () => {
             </ProtectedSecRoute>
           }
         />
+          <Route
+          path="/sUsers/LoginReport"
+          element={
+            <ProtectedSecRoute>
+              <LoginReport />
+            </ProtectedSecRoute>
+          }
+        />
          <Route
           path="/sUsers/Receiptreport"
           element={
@@ -2288,6 +2308,14 @@ const Routers = () => {
           element={
             <ProtectedSecRoute>
               <ViewReport />
+            </ProtectedSecRoute>
+          }
+        />
+           <Route
+          path="/sUsers/kotPrinterSetting"
+          element={
+            <ProtectedSecRoute>
+              <KotPrinterSetting />
             </ProtectedSecRoute>
           }
         />

@@ -20,6 +20,9 @@ import CheckoutDateModal from "./CheckoutDateModal";
 import useFetch from "@/customHook/useFetch";
 import { useSelector } from "react-redux";
 import { useNavigate } from "react-router-dom";
+import api from "../../../api/api";
+import { toast } from "sonner";
+
 
 export default function EnhancedCheckoutModal({
   isOpen = true,
@@ -220,6 +223,92 @@ export default function EnhancedCheckoutModal({
   }, [selectedCheckIns]);
 
   console.log(roomAssignments);
+const checkPendingKots = async () => {
+  try {
+    const checkInNumbers = checkouts
+      .map((checkout) => checkout?.voucherNumber)
+      .filter(Boolean);
+
+    if (!checkInNumbers.length) return true;
+
+    const response = await api.get(
+      `/api/sUsers/getRestaurantBillsDetails/${cmp_id}`,
+      {
+        params: { checkInNumbers },
+        withCredentials: true,
+      },
+    );
+
+    const allKots = response.data?.data || [];
+
+    const pendingKots = allKots.filter((kot) => {
+      // Ignore cancelled or already settled KOTs.
+      if (kot?.status === "cancelled" || kot?.paymentCompleted === true) {
+        return false;
+      }
+
+      const currentCheckout = checkouts.find(
+        (checkout) =>
+          String(checkout?.voucherNumber) === String(kot?.checkInNumber),
+      );
+
+      if (!currentCheckout) return false;
+
+      const originalCheckIn = originalCheckouts.find(
+        (checkout) => String(checkout?._id) === String(currentCheckout?._id),
+      );
+
+      const originalRooms = originalCheckIn?.selectedRooms || [];
+      const roomsBeingCheckedOut = currentCheckout?.selectedRooms || [];
+
+      // Full checkout: check every pending KOT under the check-in.
+      const isPartialCheckout =
+        roomsBeingCheckedOut.length < originalRooms.length;
+
+      if (!isPartialCheckout) {
+        return true;
+      }
+
+      // Partial checkout: compare KOT roomId with the selected room's roomId.
+      const kotRoomId = getId(kot?.roomId);
+
+      const selectedRoomMasterIds = roomsBeingCheckedOut.map((room) =>
+        getId(room?.roomId || room?.selectedRoom || room),
+      );
+
+      // KOT without a room reference is blocked too, as its room cannot
+      // be safely determined during a partial checkout.
+      return (
+        !kotRoomId ||
+        selectedRoomMasterIds.includes(kotRoomId)
+      );
+    });
+
+    if (pendingKots.length > 0) {
+      const kotDetails = pendingKots
+        .map((kot) => {
+          const room = kot?.roomId?.roomName || kot?.roomId?.roomNo;
+          return room
+            ? `${kot.voucherNumber} (Room ${room})`
+            : kot.voucherNumber;
+        })
+        .filter(Boolean)
+        .join(", ");
+
+      toast.error(
+        `Pending KOT found: ${kotDetails}. Convert it to Sale or Post to Room before checkout.`,
+      );
+
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error("Unable to check pending KOTs:", error);
+    toast.error("Unable to verify pending KOTs. Please try again.");
+    return false;
+  }
+};
 
   // Handle customer selection for a specific room
   const handleCustomerSelect = (index, customer) => {
@@ -237,7 +326,34 @@ export default function EnhancedCheckoutModal({
   //'696f204df79a8ca66f1f8da1'
   //697da866055314c367f85ad3
   // Remove a room from checkout (partial checkout)
-  const handleRemoveRoom = (roomId) => {
+  const getId = (value) => String(value?._id || value || "");
+  const handleRemoveRoom = (roomId, selectedRoomId) => {
+    const bookingWithRoom = selectedCheckIns.find((booking) =>
+      booking.selectedRooms?.some((room) => room._id === roomId),
+    );
+
+    const selectedRoom = bookingWithRoom?.selectedRooms?.find(
+      (room) => room._id === roomId,
+    );
+
+    const selectedRoomMasterId = getId(selectedRoomId || selectedRoom?.roomId);
+
+    const relatedSwap = bookingWithRoom?.roomSwapHistory?.find((swap) => {
+      const fromRoomId = getId(swap.fromRoomId);
+      const toRoomId = getId(swap.toRoomId);
+
+      return (
+        fromRoomId === selectedRoomMasterId || toRoomId === selectedRoomMasterId
+      );
+    });
+
+    if (selectedRoom?.isSwapped || relatedSwap) {
+      const shouldRemove = window.confirm(
+        "This room is part of a room swap. Removing it may affect checkout billing. Do you want to continue?",
+      );
+
+      if (!shouldRemove) return;
+    }
     const updatedRoom = selectedCheckIns.map((booking) => {
       // 1) Find the selected room by its _id
       const selectedRoom = booking.selectedRooms.find((r) => r._id === roomId);
@@ -307,9 +423,11 @@ export default function EnhancedCheckoutModal({
   };
 
   // Handle proceed to checkout
-  const handleProceed = () => {
+  const handleProceed = async () => {
+
+    const canProceed = await checkPendingKots();
+    if (!canProceed) return;
     if (!validateAssignments()) {
-      console.log("hhhh");
       return;
     }
     console.log("hhh");
@@ -322,7 +440,7 @@ export default function EnhancedCheckoutModal({
     console.log(isSameCustomer);
 
     let result;
-    
+
     if (isSameCustomer) {
       console.log("HHHhh");
       // 🔥 Merge ALL into ONE customer
@@ -430,18 +548,18 @@ export default function EnhancedCheckoutModal({
         originalCustomer: checkIn.customerId,
       })),
   );
-const handleTimeChange = (id, newTime) => {
-  setCheckouts((prev) =>
-    prev.map((checkout) =>
-      checkout._id === id
-        ? {
-            ...checkout,
-            checkOutTime: formatInputTimeTo12Hour(newTime),
-          }
-        : checkout
-    )
-  );
-};
+  const handleTimeChange = (id, newTime) => {
+    setCheckouts((prev) =>
+      prev.map((checkout) =>
+        checkout._id === id
+          ? {
+              ...checkout,
+              checkOutTime: formatInputTimeTo12Hour(newTime),
+            }
+          : checkout,
+      ),
+    );
+  };
   const handleNewDateChange = (id, newDate) => {
     console.log(id, newDate);
     setCheckOutDateTracker(newDate);
@@ -460,7 +578,9 @@ const handleTimeChange = (id, newTime) => {
             (oc) => oc._id === id,
           );
           const time =
-            checkout.checkOutTime || originalCheckout?.checkOutTime || "11:00 AM";
+            checkout.checkOutTime ||
+            originalCheckout?.checkOutTime ||
+            "11:00 AM";
           if (!originalCheckout) return checkout;
 
           const updatedRooms =
@@ -550,7 +670,7 @@ const handleTimeChange = (id, newTime) => {
           return {
             ...checkout,
             checkOutDate: newDate,
-            checkOutTime:time,
+            checkOutTime: time,
 
             stayDays: calculatedDays,
             selectedRooms: updatedRooms,
@@ -920,7 +1040,7 @@ const handleTimeChange = (id, newTime) => {
                 onDaysChange={handleStayDaysChange}
                 checkouts={checkouts}
                 onDateChange={handleNewDateChange}
-                 onTimeChange={handleTimeChange}
+                onTimeChange={handleTimeChange}
               />
             </div>
           </div>

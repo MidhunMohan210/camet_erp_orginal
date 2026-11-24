@@ -1,3 +1,5 @@
+import TouchKeyboardScope from "@/components/common/touchKeyboard/TouchKeyboardScope";
+import TouchInput from "@/components/common/touchKeyboard/TouchInput";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useReactToPrint } from "react-to-print";
 
@@ -26,6 +28,7 @@ import {
   BarChart2,
   LayoutGrid,
   ListChecks,
+  Loader2,
 } from "lucide-react";
 
 import TableSelection from "../Pages/TableSelection";
@@ -36,6 +39,7 @@ import { useSelector } from "react-redux";
 import api from "@/api/api";
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
+import { useSidebar } from "@/layout/Layout";
 import useFetch from "@/customHook/useFetch";
 import { generateAndPrintKOT } from "../Helper/kotPrintHelper";
 import { taxCalculatorForRestaurant } from "@/pages/Hotel/Helper/taxCalculator";
@@ -44,8 +48,10 @@ import { FaArrowLeft } from "react-icons/fa6";
 import { useQueryClient } from "@tanstack/react-query";
 import ParentKotPage from "../components/ParentKotPage";
 import { applyBatchEdit } from "@/pages/Restuarant/Helper/RestaurantDashBoardHelper.jsx";
-
+import RestaurantReportsMenu from "../components/RestaurantReports";
+import qz from "qz-tray";
 const RestaurantPOS = () => {
+  const sidebar = useSidebar();
   const [selectedCuisine, setSelectedCuisine] = useState("");
   const [selectedSubcategory, setSelectedSubcategory] = useState("");
   const [orderItems, setOrderItems] = useState([]);
@@ -101,6 +107,7 @@ const RestaurantPOS = () => {
   const [selectedAdditionalCharge, setSelectedAdditionalCharge] =
     useState(null);
   const [showParentKots, setShowParentKots] = useState(false);
+  const [isGeneratingKot, setIsGeneratingKot] = useState(false);
   const [
     additionalChargeDataBasedOnSelection,
     setAdditionalChargeDataBasedOnSelection,
@@ -108,6 +115,7 @@ const RestaurantPOS = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const observerTarget = useRef(null);
   const scrollContainerRef = useRef(null);
+  const isGeneratingKotRef = useRef(false);
   const scroll = (direction) => {
     if (scrollContainerRef.current) {
       const scrollAmount = 150;
@@ -117,6 +125,23 @@ const RestaurantPOS = () => {
       });
     }
   };
+
+  const menuRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setShowOptions(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, []);
+
   const [customerDetails, setCustomerDetails] = useState({
     name: "",
     phone: "",
@@ -139,6 +164,11 @@ const RestaurantPOS = () => {
   const cmp_id = useSelector(
     (state) => state.secSelectedOrganization.secSelectedOrg._id,
   );
+
+  const userType = useSelector(
+    (state) => state.s,
+  );
+  console.log(userType);
   const discountBasedOnGrossAmount =
     org?.configurations?.[0]?.discountBasedOnGrossAmount ?? false;
 
@@ -244,15 +274,22 @@ const RestaurantPOS = () => {
   );
   const config = configurations?.[0] || {};
   const orderTypesConfig = config.orderTypes || {};
+  const hasAlternativeOrderType = [
+    "dineIn",
+    "takeaway",
+    "delivery",
+    "roomService",
+  ].some((type) => orderTypesConfig[type] !== false);
+  const selectedKotPrinter = configurations?.[0]?.kotPrinter || "";
 
- const getDefaultOrderType = () => {
-  if (orderTypesConfig?.dineIn) return "dine-in";
-  if (orderTypesConfig?.takeaway) return "takeaway";
-  if (orderTypesConfig?.delivery) return "delivery";
-  if (orderTypesConfig?.roomService) return "roomService";
-  if (orderTypesConfig?.directSale) return "direct-sale";
-  return "";
-};
+  const getDefaultOrderType = () => {
+    if (orderTypesConfig?.dineIn) return "dine-in";
+    if (orderTypesConfig?.takeaway) return "takeaway";
+    if (orderTypesConfig?.delivery) return "delivery";
+    if (orderTypesConfig?.roomService) return "roomService";
+    if (orderTypesConfig?.directSale) return "direct-sale";
+    return "";
+  };
 
   const [orderType, setOrderType] = useState(getDefaultOrderType());
 
@@ -520,39 +557,41 @@ const RestaurantPOS = () => {
         console.log("Processing booking, foodPlan array:", room?.foodPlan);
 
         return (
-          room?.selectedRooms?.filter((selectedRoom) => !selectedRoom.isSwapped)?.map((selectedRoom) => {
-            const completeFoodPlan = [];
+          room?.selectedRooms
+            ?.filter((selectedRoom) => !selectedRoom.isSwapped)
+            ?.map((selectedRoom) => {
+              const completeFoodPlan = [];
 
-            room.foodPlan?.forEach((data) => {
-              // Find matching food plan for this room
-              const roomFoodPlan =
-                data.roomId === selectedRoom.roomId ? data : null;
+              room.foodPlan?.forEach((data) => {
+                // Find matching food plan for this room
+                const roomFoodPlan =
+                  data.roomId === selectedRoom.roomId ? data : null;
 
-              // Build complete food plan object
-              if (roomFoodPlan) {
-                completeFoodPlan.push({
-                  _id: roomFoodPlan._id || roomFoodPlan.foodPlanId,
-                  planType: roomFoodPlan.planType || roomFoodPlan.foodPlan,
-                  amount: roomFoodPlan.amount ?? roomFoodPlan.rate ?? 0,
-                  isComplimentary: roomFoodPlan.isComplimentary || false,
-                });
-              }
-            });
-            console.log(room);
+                // Build complete food plan object
+                if (roomFoodPlan) {
+                  completeFoodPlan.push({
+                    _id: roomFoodPlan._id || roomFoodPlan.foodPlanId,
+                    planType: roomFoodPlan.planType || roomFoodPlan.foodPlan,
+                    amount: roomFoodPlan.amount ?? roomFoodPlan.rate ?? 0,
+                    isComplimentary: roomFoodPlan.isComplimentary || false,
+                  });
+                }
+              });
+              console.log(room);
 
-            return {
-              ...selectedRoom,
-              customerName: room?.customerName,
-              guestName: room?.guestName,
-              mobileNumber: room?.mobileNumber,
-              voucherNumber: room?.voucherNumber,
-              foodPlan: completeFoodPlan,
-              bookingDate: room?.bookingDate,
-              arrivalDate: room?.arrivalDate,
-              checkOutDate: room?.checkOutDate,
-              stayDays: room?.stayDays,
-            };
-          }) || []
+              return {
+                ...selectedRoom,
+                customerName: room?.customerName,
+                guestName: room?.guestName,
+                mobileNumber: room?.mobileNumber,
+                voucherNumber: room?.voucherNumber,
+                foodPlan: completeFoodPlan,
+                bookingDate: room?.bookingDate,
+                arrivalDate: room?.arrivalDate,
+                checkOutDate: room?.checkOutDate,
+                stayDays: room?.stayDays,
+              };
+            }) || []
         );
       });
 
@@ -1031,8 +1070,21 @@ const RestaurantPOS = () => {
     setShowPaymentModal(true);
   };
 
-  const generateKOT = async (selectedTableNumber, tableStatus, parentKot ,  roomSelected) => {
-    let roomObj =  roomSelected ? roomSelected : roomDetails
+  const generateKOT = async (
+    selectedTableNumber,
+    tableStatus,
+    parentKot,
+    roomSelected,
+  ) => {
+    if (isGeneratingKotRef.current) return;
+
+    isGeneratingKotRef.current = true;
+    setIsGeneratingKot(true);
+    let newOrder;
+    let kotSaved = false;
+
+    try {
+    let roomObj = roomSelected ? roomSelected : roomDetails;
     let updatedItems = [];
     let orderCustomerDetails = {
       ...customerDetails,
@@ -1166,7 +1218,7 @@ const RestaurantPOS = () => {
 
     console.log(orderCustomerDetails);
 
-    const newOrder = {
+    newOrder = {
       id: orderNumber,
       items: [...finalProductData],
       type: orderType,
@@ -1186,12 +1238,16 @@ const RestaurantPOS = () => {
         ? `/api/sUsers/editKOT/${cmp_id}/${kotDataForEdit._id}`
         : `/api/sUsers/generateKOT/${cmp_id}`;
 
-    try {
       let response = await api.post(url, newOrder, {
         withCredentials: true,
       });
       if (response.data?.success) {
-        handleKotPrint(response.data?.data,roomObj);
+        kotSaved = true;
+        // Close order-detail overlays before opening either QZ or the browser print dialog.
+        setShowKOTModal(false);
+        setShowFullTableSelection(false);
+        handleKotPrint(response.data?.data, roomObj);
+        setOrderItems([]);
         console.log(selectedTableNumber);
         if (orderType === "dine-in") {
           await api.put(
@@ -1210,28 +1266,41 @@ const RestaurantPOS = () => {
       }
     } catch (error) {
       console.log(error);
-      toast.error(error.response.data.message);
-    } finally {
-      setOrders([...orders, newOrder]);
-      setOrderItems([]);
-      setOrderNumber(orderNumber + 1);
-      setShowKOTModal(false);
-      setIsEdit(false);
-      setCustomerDetails({
-        name: "",
-        phone: "",
-        address: "",
-        tableNumber: "10",
-      });
-      setSearch("");
-      setShowResults(true);
-      setRoomDetails({});
-      toast.success(
-        kotDataForEdit
-          ? "KOT updated successfully!"
-          : "KOT generated successfully!",
+      toast.error(
+        error.response?.data?.error ||
+          error.response?.data?.message ||
+          "Unable to generate KOT.",
       );
-      navigate(location.pathname, { replace: true, state: {} });
+    } finally {
+      console.log(newOrder,kotSaved)
+      if (kotSaved && newOrder) {
+
+        setOrders((currentOrders) => [...currentOrders, newOrder]);
+        setOrderNumber((currentOrderNumber) => currentOrderNumber + 1);
+        setShowKOTModal(false);
+        setIsEdit(false);
+        setCustomerDetails({
+          name: "",
+          phone: "",
+          address: "",
+          tableNumber: "10",
+        });
+        setSearch("");
+        setShowResults(true);
+        setRoomDetails({});
+        toast.success(
+          kotDataForEdit
+            ? "KOT updated successfully!"
+            : "KOT generated successfully!",
+        );
+        navigate(location.pathname, { replace: true, state: {} });
+      }
+
+      // Keep Confirm KOT locked until the modal-close update has rendered.
+      requestAnimationFrame(() => {
+        isGeneratingKotRef.current = false;
+        setIsGeneratingKot(false);
+      });
     }
   };
 
@@ -1268,7 +1337,7 @@ const RestaurantPOS = () => {
     return typeMap[type] || type;
   };
 
-  const handleKotPrint = (data,roomDetails) => {
+  const handleKotPrint = (data, roomDetails) => {
     console.log(roomDetails);
     const orderData = {
       kotNo: data?.voucherNumber,
@@ -1276,11 +1345,11 @@ const RestaurantPOS = () => {
       type: data.type,
       items: orderItems,
       createdAt: new Date(),
-      roomName : roomDetails?.roomno,
-      guestName : roomDetails?.guestName,
-      foodPlan:roomDetails?.foodPlan || [],
+      roomName: roomDetails?.roomno,
+      guestName: roomDetails?.guestName,
+      foodPlan: roomDetails?.foodPlan || [],
     };
-    generateAndPrintKOT(orderData, true, false, companyName);
+    generateAndPrintKOT(orderData, true, false, companyName ,selectedKotPrinter);
   };
 
   const handleSelectedPriceLevel = (value) => {
@@ -1405,6 +1474,15 @@ const RestaurantPOS = () => {
             <div className="flex items-center justify-between gap-2 md:gap-3">
               {/* Left Section - Logo & Title */}
               <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  aria-label="Open main navigation"
+                  title="Main navigation"
+                  onClick={sidebar?.handleToggleSidebar}
+                  className="p-2 xl:hidden hover:bg-white/10 rounded-lg transition-colors duration-200"
+                >
+                  <Menu className="w-5 h-5" />
+                </button>
                 <button
                   className="md:hidden p-1.5 hover:bg-white/10 rounded-lg transition-colors duration-200"
                   onClick={() => setShowSidebar(!showSidebar)}
@@ -1533,7 +1611,7 @@ const RestaurantPOS = () => {
                     </span>
                   </div>
 
-                  <div className="relative">
+                  <div className="relative" ref={menuRef}>
                     <button
                       onClick={() => setShowOptions((prev) => !prev)}
                       className="flex items-center justify-center px-2 py-1.5 bg-slate-800/50 border border-l-0 border-slate-700/60 rounded-r-md hover:bg-slate-700/60 transition-colors group"
@@ -1544,176 +1622,11 @@ const RestaurantPOS = () => {
                         <span className="w-[3px] h-[3px] bg-gray-400 rounded-full group-hover:bg-gray-200 transition-colors"></span>
                       </span>
                     </button>
-                    {showOptions && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-40"
-                          onClick={() => setShowOptions(false)}
-                        />
-                        <div
-                          className="absolute right-0 top-full mt-1.5 z-50 w-64 bg-white border 
-                    border-gray-200 rounded-xl shadow-xl overflow-hidden"
-                        >
-                          {/* Header */}
-                          <div className="flex items-center gap-2.5 px-3.5 py-3 border-b border-gray-100">
-                            <div className="w-7 h-7 rounded-lg bg-orange-50 flex items-center justify-center flex-shrink-0">
-                              <Coffee className="w-3.5 h-3.5 text-orange-700" />
-                            </div>
-                            <div>
-                              <p className="text-xs font-bold text-gray-800 tracking-wide uppercase">
-                                Restaurant Reports
-                              </p>
-                              <p className="text-[10px] text-gray-400 mt-0.5">
-                                3 report types available
-                              </p>
-                            </div>
-                          </div>
 
-                          {/* Items */}
-                          <div className="p-1.5">
-                            <button
-                              onClick={() => {
-                                setShowOptions(false);
-                                navigate("/sUsers/BillSummary?type=restaurant");
-                              }}
-                              className="group flex items-center gap-3 w-full px-2.5 py-2 rounded-lg 
-                     hover:bg-gray-50 transition-colors text-left"
-                            >
-                              <div className="w-8 h-8 rounded-lg bg-green-50 flex items-center justify-center flex-shrink-0">
-                                <BarChart2 className="w-3.5 h-3.5 text-green-700" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-semibold text-gray-800">
-                                  Daily Sales
-                                </p>
-                                <p className="text-[10px] text-gray-400 mt-0.5">
-                                  Restaurant daily revenue summary
-                                </p>
-                              </div>
-                              <ChevronDown
-                                className="w-3 h-3 text-gray-300 -rotate-90 opacity-0 
-                                  group-hover:opacity-100 transition-opacity flex-shrink-0"
-                              />
-                            </button>
-
-                            <div className="my-1 border-t border-gray-100" />
-
-                            <button
-                              onClick={() => {
-                                setShowOptions(false);
-                                navigate("/sUsers/categoryprint");
-                              }}
-                              className="group flex items-center gap-3 w-full px-2.5 py-2 rounded-lg 
-                     hover:bg-gray-50 transition-colors text-left"
-                            >
-                              <div className="w-8 h-8 rounded-lg bg-purple-50 flex items-center justify-center flex-shrink-0">
-                                <LayoutGrid className="w-3.5 h-3.5 text-purple-700" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-semibold text-gray-800">
-                                  Category Wise Sales
-                                </p>
-                                <p className="text-[10px] text-gray-400 mt-0.5">
-                                  Sales grouped by category
-                                </p>
-                              </div>
-                              <ChevronDown
-                                className="w-3 h-3 text-gray-300 -rotate-90 opacity-0 
-                                  group-hover:opacity-100 transition-opacity flex-shrink-0"
-                              />
-                            </button>
-
-                            <button
-                              onClick={() => {
-                                setShowOptions(false);
-                                navigate("/sUsers/itemwisereport");
-                              }}
-                              className="group flex items-center gap-3 w-full px-2.5 py-2 rounded-lg 
-                     hover:bg-gray-50 transition-colors text-left"
-                            >
-                              <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
-                                <ListChecks className="w-3.5 h-3.5 text-blue-700" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-semibold text-gray-800">
-                                  Item Wise Sales
-                                </p>
-                                <p className="text-[10px] text-gray-400 mt-0.5">
-                                  Breakdown per menu item
-                                </p>
-                              </div>
-                              <ChevronDown
-                                className="w-3 h-3 text-gray-300 -rotate-90 opacity-0 
-                                  group-hover:opacity-100 transition-opacity flex-shrink-0"
-                              />
-                            </button>
-                            <button
-                              onClick={() => {
-                                setShowOptions(false);
-                                navigate("/sUsers/register");
-                              }}
-                              className="group flex items-center gap-3 w-full px-2.5 py-2 rounded-lg 
-                     hover:bg-gray-50 transition-colors text-left"
-                            >
-                              <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
-                                <BarChart2 className="w-3.5 h-3.5 text-blue-700" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-semibold text-gray-800">
-                                  Kot Register
-                                </p>
-                                <p className="text-[10px] text-gray-400 mt-0.5">
-                                  Breakdown of kots{" "}
-                                </p>
-                              </div>
-                              <ChevronDown
-                                className="w-3 h-3 text-gray-300 -rotate-90 opacity-0 
-                                  group-hover:opacity-100 transition-opacity flex-shrink-0"
-                              />
-                            </button>
-                             <button
-                              onClick={() => {
-                                setShowOptions(false);
-                                navigate("/sUsers/Receiptreport");
-                              }}
-                              className="group flex items-center gap-3 w-full px-2.5 py-2 rounded-lg 
-                     hover:bg-gray-50 transition-colors text-left"
-                            >
-                              <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
-                                <BarChart2 className="w-3.5 h-3.5 text-blue-700" />
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="text-xs font-semibold text-gray-800">
-                                 Receipt Report
-                                </p>
-                                <p className="text-[10px] text-gray-400 mt-0.5">
-                                  Breakdown of Recipts{" "}
-                                </p>
-                              </div>
-                              <ChevronDown
-                                className="w-3 h-3 text-gray-300 -rotate-90 opacity-0 
-                                  group-hover:opacity-100 transition-opacity flex-shrink-0"
-                              />
-                            </button>
-                            <button
-          onClick={() => { setShowOptions(false); navigate("/sUsers/sales-register"); }}
-          className="group flex items-center gap-3 w-full px-2.5 py-2 rounded-lg 
-                     hover:bg-gray-50 transition-colors text-left"
-        >
-          <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-shrink-0">
-            <LayoutGrid className="w-3.5 h-3.5 text-blue-700" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-gray-800">Sale Register</p>
-            <p className="text-[10px] text-gray-400 mt-0.5">Breakdown of Sales </p>
-          </div>
-          <ChevronDown className="w-3 h-3 text-gray-300 -rotate-90 opacity-0 
-                                  group-hover:opacity-100 transition-opacity flex-shrink-0" />
-        </button>
-                          </div>
-                        </div>
-                      </>
-                    )}
+                    <RestaurantReportsMenu
+                      showOptions={showOptions}
+                      setShowOptions={setShowOptions}
+                    />
                   </div>
                 </div>
 
@@ -1921,7 +1834,7 @@ const RestaurantPOS = () => {
                           subcategory.name,
                         )
                       }
-                      className={`w-full text-left px-3 py-2.5 mb-2 rounded-xl font-semibold transition-all duration-300 flex items-center gap-2 border hover:scale-[1.02] hover:translate-x-1 transform group text-xs
+                        className={`w-full text-left px-3 py-2.5 mb-2 rounded-xl font-semibold transition-all duration-300 flex items-center gap-2 border hover:scale-[1.02] hover:translate-x-1 transform group text-xs
                     ${
                       selectedSubcategory?.subcategoryId === subcategory._id
                         ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-transparent shadow-lg shadow-indigo-500/25"
@@ -1948,7 +1861,7 @@ const RestaurantPOS = () => {
             <div className="p-3 bg-white/90 backdrop-blur-sm border-b border-gray-200/50">
               <div className="mb-2 relative">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-indigo-500 w-5 h-5" />
-                <input
+                <TouchInput
                   type="text"
                   placeholder="Search items..."
                   value={searchTerm}
@@ -1998,7 +1911,7 @@ const RestaurantPOS = () => {
                 </div>
               ) : (
                 <>
-                  <div className="mb-3 flex items-center justify-between">
+                  <div className="mb-3 flex items-center justify-between gap-2">
                     <h3 className="text-sm font-bold text-gray-700 flex items-center gap-1.5">
                       <span className="w-2 h-2 bg-gradient-to-r from-indigo-500 to-blue-500 rounded-full"></span>
                       {selectedSubcategory
@@ -2008,7 +1921,7 @@ const RestaurantPOS = () => {
                           : `All Items (${menuItems.length})`}
                     </h3>
 
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
                       {/* Secondary Action - Tag To Kot */}
                       {orderItems.length > 0 && (
                         <button
@@ -2211,11 +2124,11 @@ const RestaurantPOS = () => {
 
                         <div className="flex items-center gap-1 mt-0.5">
                           <span className="text-xs text-gray-500">₹</span>
-                          <input
+                          <TouchInput
                             type="number"
                             value={item.price}
                             onChange={(e) => {
-                              const newPrice = parseFloat(e.target.value);
+                              const newPrice = parseFloat(e.target.value) || 0;
                               setOrderItems(
                                 orderItems.map((orderItem) =>
                                   orderItem._id === item._id
@@ -2255,7 +2168,7 @@ const RestaurantPOS = () => {
                         </button>
 
                         <div className="relative">
-                          <input
+                          <TouchInput
                             className="text-sm font-bold w-14 text-center bg-white px-2 py-1 rounded-lg border border-gray-200 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                             type="number"
                             inputMode="decimal"
@@ -2364,22 +2277,23 @@ const RestaurantPOS = () => {
                       </span>
                     </button>
                   )}
-                     {orderTypesConfig?.directSale !== false && (
-      <button
-        onClick={() => {
-          console.log("Direct Sale button clicked");
-          setOrderType("direct-sale");
-        }}
-        className={`flex flex-col items-center justify-center h-10 rounded-xl border transition-all duration-300 transform hover:scale-105 col-span-2 ${
-          orderType === "direct-sale"
-            ? "border-transparent bg-gradient-to-r from-green-600 to-emerald-600 text-white shadow-lg shadow-emerald-500/25"
-            : "border-gray-200 bg-white/80 text-gray-700 hover:border-green-300 hover:bg-gradient-to-r hover:from-green-50 hover:to-emerald-50"
-        }`}
-      >
-        <Receipt className="w-4 h-4 mb-0.5" />
-        <span className="font-semibold text-xs">Direct Sale</span>
-      </button>
-    )}
+                  {orderTypesConfig?.directSale !== false &&
+                    hasAlternativeOrderType && (
+                    <button
+                      onClick={() => {
+                        console.log("Direct Sale button clicked");
+                        setOrderType("direct-sale");
+                      }}
+                      className={`flex flex-col items-center justify-center h-10 rounded-xl border transition-all duration-300 transform hover:scale-105 col-span-2 ${
+                        orderType === "direct-sale"
+                          ? "border-transparent bg-gradient-to-r from-green-600 to-emerald-600 text-white shadow-lg shadow-emerald-500/25"
+                          : "border-gray-200 bg-white/80 text-gray-700 hover:border-green-300 hover:bg-gradient-to-r hover:from-green-50 hover:to-emerald-50"
+                      }`}
+                    >
+                      <Receipt className="w-4 h-4 mb-0.5" />
+                      <span className="font-semibold text-xs">Direct Sale</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -2411,8 +2325,7 @@ const RestaurantPOS = () => {
               onClick={() => {
                 setShowFullTableSelection(false);
                 if (
-                  !kotDataForEdit &&
-                  Object.keys(kotDataForEdit).length <= 0
+                  !kotDataForEdit
                 ) {
                   setRoomDetails({});
                 }
@@ -2423,8 +2336,7 @@ const RestaurantPOS = () => {
                 onClick={() => {
                   setShowFullTableSelection(false);
                   if (
-                    !kotDataForEdit &&
-                    Object.keys(kotDataForEdit).length <= 0
+                    !kotDataForEdit
                   ) {
                     setRoomDetails({});
                   }
@@ -2438,8 +2350,13 @@ const RestaurantPOS = () => {
             <div>
               <TableSelection
                 showKOTs={false}
-                onTableSelect={(table , roomDetails) => {
-                  generateKOT(table.tableNumber, table.status ,null,roomDetails)
+                onTableSelect={(table, roomDetails) => {
+                  generateKOT(
+                    table.tableNumber,
+                    table.status,
+                    null,
+                    roomDetails,
+                  );
                   setShowFullTableSelection(false);
                 }}
                 roomData={roomData}
@@ -2454,7 +2371,7 @@ const RestaurantPOS = () => {
 
       {/* Compact KOT Modal */}
       {showKOTModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-2">
+        <div className="kot-details-modal fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-2">
           <div className="bg-white/95 backdrop-blur-xl rounded-2xl p-4 max-w-sm w-full mx-2 transform transition-all duration-300 scale-100 max-h-[85vh] overflow-y-auto border border-white/20 shadow-2xl animate-in zoom-in-95">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
@@ -2502,7 +2419,7 @@ const RestaurantPOS = () => {
                     </label>
 
                     <div className="relative w-full">
-                      <input
+                      <TouchInput
                         type="text"
                         placeholder="Search room..."
                         className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-violet-500"
@@ -2559,7 +2476,7 @@ const RestaurantPOS = () => {
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
                       Guest Name
                     </label>
-                    <input
+                    <TouchInput
                       type="text"
                       value={roomDetails.guestName}
                       onChange={(e) =>
@@ -2576,7 +2493,7 @@ const RestaurantPOS = () => {
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
                       Check-In Number
                     </label>
-                    <input
+                    <TouchInput
                       type="text"
                       value={roomDetails.CheckInNumber || ""}
                       readOnly
@@ -2592,7 +2509,7 @@ const RestaurantPOS = () => {
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
                       Customer Name
                     </label>
-                    <input
+                    <TouchInput
                       type="text"
                       value={customerDetails.name}
                       onChange={(e) =>
@@ -2608,8 +2525,9 @@ const RestaurantPOS = () => {
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
                       Phone Number
                     </label>
-                    <input
+                    <TouchInput
                       type="text"
+                      keyboardType="number"
                       value={customerDetails.phone}
                       onChange={(e) =>
                         setCustomerDetails({
@@ -2625,7 +2543,7 @@ const RestaurantPOS = () => {
                       <label className="block text-sm font-semibold text-gray-700 mb-2">
                         Delivery Address
                       </label>
-                      <textarea
+                      <TouchInput as="textarea"
                         rows={3}
                         value={customerDetails.address}
                         onChange={(e) =>
@@ -2635,7 +2553,7 @@ const RestaurantPOS = () => {
                           })
                         }
                         className="w-full p-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:border-indigo-500 text-sm resize-none bg-white transition-all duration-200"
-                      ></textarea>
+                      ></TouchInput>
                     </div>
                   )}
                 </>
@@ -2658,9 +2576,17 @@ const RestaurantPOS = () => {
               </button>
               <button
                 onClick={generateKOT}
-                className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 hover:scale-105 active:scale-95 shadow-lg shadow-indigo-500/25"
+                disabled={isGeneratingKot}
+                className="flex-1 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-2.5 rounded-xl text-sm font-semibold transition-all duration-200 hover:scale-105 active:scale-95 shadow-lg shadow-indigo-500/25 disabled:cursor-not-allowed disabled:opacity-70 disabled:hover:scale-100"
               >
-                Confirm KOT
+                {isGeneratingKot ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generating...
+                  </span>
+                ) : (
+                  "Confirm KOT"
+                )}
               </button>
             </div>
           </div>
@@ -2853,9 +2779,11 @@ const RestaurantPOS = () => {
                       </option>
                     ))}
                   </select>
-                  <input
+                  <TouchInput
                     type="text"
                     min="0"
+                    keyboardType="number"
+                    allowDecimal
                     value={discountValue}
                     onChange={(e) =>
                       handleDiscountChange(e.target.value, discountType)
@@ -2998,4 +2926,6 @@ const RestaurantPOS = () => {
   );
 };
 
-export default RestaurantPOS;
+export default function RestaurantPOSWithKeyboard() {
+  return <TouchKeyboardScope><RestaurantPOS /></TouchKeyboardScope>;
+}
